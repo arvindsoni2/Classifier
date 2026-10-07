@@ -44,6 +44,11 @@ export function putFile(root: string, name: string, content = 'fixture content\n
   return name;
 }
 
+export function putBinaryFile(root: string, name: string, data: Buffer): string {
+  writeFileSync(join(root, name), data);
+  return name;
+}
+
 export function putNestedFile(root: string, segments: string[], name: string, content = 'nested\n'): string {
   const dir = join(root, ...segments);
   mkdirSync(dir, { recursive: true });
