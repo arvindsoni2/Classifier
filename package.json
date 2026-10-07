@@ -1,0 +1,31 @@
+{
+  "name": "fedora-organiser",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Fedora Downloads organiser: scoped read-only discovery, typed decision providers and reviewed moves.",
+  "engines": {
+    "node": ">=22.18.0 <23"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:e2e": "node scripts/not-until-task.js e2e 9",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint .",
+    "build": "tsc -p tsconfig.build.json",
+    "test:native": "node scripts/not-until-task.js native 7",
+    "doctor": "node scripts/not-until-task.js doctor 4",
+    "eval:fixture": "node scripts/not-until-task.js eval-fixture 5"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.2.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.16.0",
+    "eslint": "^9.30.0",
+    "typescript": "^5.9.0",
+    "typescript-eslint": "^8.35.0",
+    "vitest": "^3.2.4"
+  }
+}

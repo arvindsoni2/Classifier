@@ -1,0 +1,13 @@
+node_modules/
+dist/
+coverage/
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+.superpowers/
+config/local/
+.env
+.env.*
+test-results/
+playwright-report/

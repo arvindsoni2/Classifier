@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "recordedAt": "2026-10-07T11:08:30+00:00",
+  "codingAgent": {
+    "harness": "OpenCode",
+    "model": "GLM-5.3",
+    "provider": "opencode-go",
+    "role": "implementation (docs/07-OpenCode-Handoff.md); Codex owns planning review"
+  },
+  "runtime": {
+    "node": "22.23.2",
+    "pnpm": "11.22.0",
+    "kernel": "7.2.8-200.fc44.x86_64",
+    "os": "Fedora (user-reported context: i7, 32 GB RAM)",
+    "rustToolchain": {
+      "status": "missing",
+      "detail": "rustc/cargo not installed; blocks Task 7 (Milestone C) only. Milestone A is TypeScript-only."
+    }
+  },
+  "packages": {
+    "better-sqlite3": "12.11.1",
+    "bundledSqlite": "3.53.2",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.71.1",
+    "eslint": "9.39.5",
+    "vitest": "3.2.7",
+    "@types/node": "22.20.5",
+    "@types/better-sqlite3": "7.6.13",
+    "nativeBuildApproval": "pnpm-workspace.yaml allowBuilds (better-sqlite3, esbuild 0.28.2)"
+  },
+  "externalTools": {
+    "pdftotext": "26.01.0"
+  },
+  "providers": {
+    "rules": {
+      "status": "in-process deterministic baseline",
+      "implementedInTask": 4
+    },
+    "laya": {
+      "status": "blocked",
+      "detail": "No ONNX checkpoint present on this machine (receptron/laya, ~1.7 GB FP32 English checkpoint per docs/08). Real-model smoke tests will be recorded as blocked, not substituted."
+    },
+    "clef": {
+      "status": "configured",
+      "endpoint": "http://127.0.0.1:11434",
+      "configLocation": "config/local/providers.json (gitignored)",
+      "detail": "User-provided loopback endpoint; health probe verifies an actual typed POST /v1/systemone response on synthetic fixtures. 11434 is commonly an Ollama chat endpoint; a chat-only response is recorded as blocked, never substituted (docs/08, 'Local Clef runtime')."
+    },
+    "jev": {
+      "status": "disabled",
+      "detail": "Requires explicit dataset cloud consent; no consent recorded (PRD §8, LLD §3)."
+    }
+  },
+  "notes": [
+    "Actual resolved versions, verified 2026-10-07; no placeholder claims.",
+    "Automated tests use synthetic fixture roots under /tmp/opencode only; the real Downloads directory is never a test fixture (AGENTS.md rule 12).",
+    "Playwright (test:e2e) and the Rust helper (test:native) are later plan tasks; their npm scripts fail loudly with 'not until Task N' in the interim."
+  ]
+}
