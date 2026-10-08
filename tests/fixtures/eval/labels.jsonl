@@ -1,0 +1,8 @@
+{"itemId":"item-invoice-01","primaryCategoryId":"cat-invoices","acceptableCategoryIds":["cat-invoices"],"sufficientEvidence":true,"newFolderState":"reuse_existing"}
+{"itemId":"item-invoice-02","primaryCategoryId":"cat-invoices","acceptableCategoryIds":["cat-invoices"],"sufficientEvidence":true,"newFolderState":"reuse_existing"}
+{"itemId":"item-photo-01","primaryCategoryId":"cat-photos","acceptableCategoryIds":["cat-photos"],"sufficientEvidence":true,"newFolderState":"reuse_existing"}
+{"itemId":"item-photo-02","primaryCategoryId":"cat-photos","acceptableCategoryIds":["cat-photos"],"sufficientEvidence":true,"newFolderState":"reuse_existing"}
+{"itemId":"item-career-01","primaryCategoryId":"cat-career","acceptableCategoryIds":["cat-career"],"sufficientEvidence":true,"newFolderState":"reuse_existing"}
+{"itemId":"item-finance-01","primaryCategoryId":"cat-finance","acceptableCategoryIds":["cat-finance"],"sufficientEvidence":true,"newFolderState":"reuse_existing"}
+{"itemId":"item-software-01","primaryCategoryId":"cat-software","acceptableCategoryIds":["cat-software"],"sufficientEvidence":true,"newFolderState":"reuse_existing"}
+{"itemId":"item-unclear-01","primaryCategoryId":"cat-personal","acceptableCategoryIds":["cat-personal","cat-software"],"sufficientEvidence":false,"newFolderState":"insufficient_evidence"}

@@ -31,6 +31,36 @@
   "externalTools": {
     "pdftotext": "26.01.0"
   },
+  "evaluation": {
+    "status": "fixture-ready",
+    "syntheticFixture": {
+      "location": "tests/fixtures/eval",
+      "runDate": "2026-10-08",
+      "runCommand": "pnpm eval:fixture (dist/eval/fixture.js)",
+      "synthetic": true,
+      "providersEvaluated": ["rules", "laya (blocked)"],
+      "items": 8,
+      "families": 6,
+      "splits": "family-aware, seed 20261006 (development/test populated; calibration empty at this fixture size — actual support published)",
+      "rulesResults": {
+        "completed": 3,
+        "deferred": 5,
+        "failed": 0,
+        "completionAdjustedAccuracy": 0.375,
+        "conditionalAccuracy": 1.0,
+        "primaryTop1": 1.0,
+        "macroF1": 0.2222,
+        "accuracyWilson95": [0.1368, 0.6943],
+        "deferral": { "unknownRecall": 1.0, "unknownPrecision": 0.2 },
+        "probability": { "multiclassBrier": 1.25, "ece5Bin": 0.625, "nodeSupport": 8 }
+      },
+      "notes": [
+        "Synthetic fixture metrics only: NOT laptop measurements, NOT user data, NOT model benchmark results (docs/05 §8).",
+        "The rules baseline deferring on metadata-only images/installers with precision 0.2 is the expected behaviour of a keyword baseline under explicit unknown-output policy; it demonstrates deferral accounting, not model quality.",
+        "Clef and real Laya evaluations are blocked in this environment (see providers above); the deterministic synthetic report is the Milestone A evaluation evidence."
+      ]
+    }
+  },
   "providers": {
     "rules": {
       "status": "ok",

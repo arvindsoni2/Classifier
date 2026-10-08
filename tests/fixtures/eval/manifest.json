@@ -1,0 +1,21 @@
+{
+  "schemaVersion": "1.0.0",
+  "datasetHash": "fb06b5f8127a4b6acc61b79297616d2d314a2cc7c210a418256140f72c66922e",
+  "taxonomyHash": "7b7d68163cdb39eb2e9ff74c1813ecc0a143bd2c986f7fa0cb6f63b340e86015",
+  "policyHash": "4bbbe9c336f4f2762410bbf69031953696fe16d8d0f461a678b3baea88318e84",
+  "splitSeed": 20261006,
+  "extractorRevision": "extract@1.0.0+pdftotext@26.01.0",
+  "evidenceTreatment": "compact_text",
+  "sourceRevisions": [
+    "filesystem-snapshot@1.0.0",
+    "collection-fixture@1.0.0"
+  ],
+  "machine": {
+    "synthetic": true
+  },
+  "consentId": null,
+  "notes": [
+    "Synthetic fixture: eight items across six families, including one duplicate family pair and one metadata-only unclear file.",
+    "Labels are user-style placement preferences for testing the frozen contracts; they are not real laptop data."
+  ]
+}

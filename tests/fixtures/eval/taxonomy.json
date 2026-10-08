@@ -1,0 +1,68 @@
+{
+  "tree": [
+    {
+      "id": "root",
+      "parentId": null,
+      "label": "Inbox",
+      "description": "Root grouping",
+      "destinationId": null,
+      "kind": "group"
+    },
+    {
+      "id": "cat-invoices",
+      "parentId": "root",
+      "label": "Invoices",
+      "description": "Invoice and billing documents",
+      "destinationId": "dest-invoices",
+      "kind": "existing"
+    },
+    {
+      "id": "cat-photos",
+      "parentId": "root",
+      "label": "Photos",
+      "description": "Photos, video and audio",
+      "destinationId": "dest-photos",
+      "kind": "existing"
+    },
+    {
+      "id": "cat-career",
+      "parentId": "root",
+      "label": "Career",
+      "description": "Resumes and job applications",
+      "destinationId": "dest-career",
+      "kind": "existing"
+    },
+    {
+      "id": "cat-finance",
+      "parentId": "root",
+      "label": "Finance",
+      "description": "Bank statements and taxes",
+      "destinationId": "dest-finance",
+      "kind": "existing"
+    },
+    {
+      "id": "cat-personal",
+      "parentId": "root",
+      "label": "Personal",
+      "description": "Personal documents",
+      "destinationId": "dest-personal",
+      "kind": "existing"
+    },
+    {
+      "id": "cat-software",
+      "parentId": "root",
+      "label": "Software",
+      "description": "Installers and packages",
+      "destinationId": "dest-software",
+      "kind": "existing"
+    }
+  ],
+  "destinations": [
+    { "id": "dest-invoices", "segments": ["Invoices"], "device": "65026", "inode": "100001", "status": "observed" },
+    { "id": "dest-photos", "segments": ["Photos"], "device": "65026", "inode": "100002", "status": "observed" },
+    { "id": "dest-career", "segments": ["Career"], "device": "65026", "inode": "100003", "status": "observed" },
+    { "id": "dest-finance", "segments": ["Finance"], "device": "65026", "inode": "100004", "status": "observed" },
+    { "id": "dest-personal", "segments": ["Personal"], "device": "65026", "inode": "100005", "status": "observed" },
+    { "id": "dest-software", "segments": ["Software"], "device": "65026", "inode": "100006", "status": "observed" }
+  ]
+}

@@ -15,7 +15,7 @@
     "build": "tsc -p tsconfig.build.json",
     "test:native": "node scripts/not-until-task.js native 7",
     "doctor": "node dist/cli/doctor.js",
-    "eval:fixture": "node scripts/not-until-task.js eval-fixture 5"
+    "eval:fixture": "node dist/eval/fixture.js"
   },
   "dependencies": {
     "better-sqlite3": "^12.2.0"
