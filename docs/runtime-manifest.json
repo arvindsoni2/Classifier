@@ -49,13 +49,14 @@
         "completionAdjustedAccuracy": 0.375,
         "conditionalAccuracy": 1.0,
         "primaryTop1": 1.0,
-        "macroF1": 0.2222,
+        "macroF1": 0.3333,
         "accuracyWilson95": [0.1368, 0.6943],
         "deferral": { "unknownRecall": 1.0, "unknownPrecision": 0.2 },
         "probability": { "multiclassBrier": 1.25, "ece5Bin": 0.625, "nodeSupport": 8 }
       },
       "notes": [
         "Synthetic fixture metrics only: NOT laptop measurements, NOT user data, NOT model benchmark results (docs/05 §8).",
+        "macroF1 was 0.2222 in the first commit of this report; the Milestone A final review caught a predictedSupport double-count (C1) and it is corrected to 0.3333 — see git history and the final-review ledger lines.",
         "The rules baseline deferring on metadata-only images/installers with precision 0.2 is the expected behaviour of a keyword baseline under explicit unknown-output policy; it demonstrates deferral accounting, not model quality.",
         "Clef and real Laya evaluations are blocked in this environment (see providers above); the deterministic synthetic report is the Milestone A evaluation evidence."
       ]
