@@ -81,6 +81,14 @@ interface SanitizedItemRow {
   privateEvidenceIncluded: false;
 }
 
+interface PrivateEvidenceRow {
+  itemId: string;
+  externalId: string;
+  state: Record<string, unknown>;
+  stateHash: string;
+  profile: string;
+}
+
 export async function exportRun(
   run: EvalRun,
   dataset: EvalDataset | null,
@@ -130,6 +138,20 @@ export async function exportRun(
 
   writeFileSync(join(outDir, 'run.json'), `${JSON.stringify({ ...run, synthetic: true }, null, 2)}\n`);
   files.push('run.json');
+
+  // Private evidence is written ONLY under an explicit opt-in, into its own
+  // clearly named file (LLD §4: excluded from exports unless requested).
+  if (options.includePrivateEvidence === true && dataset !== null) {
+    const privateRows: PrivateEvidenceRow[] = dataset.items.map((item) => ({
+      itemId: item.itemId,
+      externalId: item.externalId,
+      state: item.evidence.state,
+      stateHash: item.evidence.stateHash,
+      profile: item.evidence.profile,
+    }));
+    writeFileSync(join(outDir, 'private-evidence.jsonl'), jsonl(privateRows));
+    files.push('private-evidence.jsonl');
+  }
 
   return { ok: true, value: files };
 }

@@ -1,7 +1,6 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { appendFileSync, cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterAll, describe, expect, it } from 'vitest';
-import type { Decision, DecisionProvider, DecisionRequest, ProviderManifest, Result } from '../../src/domain/contracts.js';
+import { afterAll, describe, expect, it } from 'vitest';import type { Decision, DecisionProvider, DecisionRequest, ProviderManifest, Result } from '../../src/domain/contracts.js';
 import { loadDataset, loadLabels } from '../../src/eval/dataset.js';
 import { runEvaluation, appendNodeCalibration } from '../../src/eval/runner.js';
 import { scoreRun } from '../../src/eval/metrics.js';
@@ -18,6 +17,7 @@ afterAll(() => {
 
 /** Records every request handed to the wrapped provider (never labels). */
 class RecordingProvider implements DecisionProvider {
+  readonly providerId = 'rules' as const;
   readonly captured: DecisionRequest[] = [];
   readonly provider: DecisionProvider;
 
@@ -49,6 +49,34 @@ describe('loadDataset + runEvaluation on the synthetic fixture', () => {
     expect(splitOf.get('item-invoice-01')).toBe(splitOf.get('item-invoice-02'));
     expect(splitOf.get('item-photo-01')).toBe(splitOf.get('item-photo-02'));
     expect(dataset.value.manifest.splitSeed).toBe(20261006);
+    expect(dataset.value.datasetHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(dataset.value.datasetHash).toBe(dataset.value.manifest.datasetHash);
+    expect(dataset.value.taxonomyHash).toBe(dataset.value.manifest.taxonomyHash);
+  });
+
+  it('rejects a tampered manifest hash and duplicate item IDs as Result errors', () => {
+    const tampered = mkdtempSync(join('/tmp/opencode', 'eval-tamper-'));
+    outDirs.push(tampered);
+    cpSync(FIXTURE, tampered, { recursive: true });
+    writeFileSync(
+      join(tampered, 'manifest.json'),
+      JSON.stringify({ ...JSON.parse(readFileSync(join(tampered, 'manifest.json'), 'utf8')), datasetHash: 'f'.repeat(64) }),
+    );
+    const dataset = loadDataset(tampered);
+    expect(dataset.ok).toBe(false);
+    if (!dataset.ok) {
+      expect(dataset.code).toBe('INVALID_DECISION');
+      expect(dataset.detail).toMatch(/hash|mismatch/i);
+    }
+
+    const dupes = mkdtempSync(join('/tmp/opencode', 'eval-dupes-'));
+    outDirs.push(dupes);
+    cpSync(FIXTURE, dupes, { recursive: true });
+    const firstLine = readFileSync(join(dupes, 'items.jsonl'), 'utf8').split('\n')[0] ?? '';
+    appendFileSync(join(dupes, 'items.jsonl'), `${firstLine}\n`);
+    const duplicated = loadDataset(dupes);
+    expect(duplicated.ok).toBe(false);
+    if (!duplicated.ok) expect(duplicated.detail).toMatch(/duplicate/i);
   });
 
   it('routes deterministically and defers rather than guessing on weak evidence', async () => {
@@ -109,6 +137,10 @@ describe('loadDataset + runEvaluation on the synthetic fixture', () => {
     const report = scoreRun(run, labels.value);
     expect(report.providers.laya).toBeDefined();
     expect(report.providers.laya?.status).toBe('blocked');
+    // A provider that never ran reports honest nulls, not zero metrics.
+    expect(report.providers.laya?.classification).toBeNull();
+    expect(report.providers.laya?.deferral).toBeNull();
+    expect(report.providers.laya?.probability).toBeNull();
     expect(report.notes.join(' ')).toContain('laya: blocked provider');
   });
 
@@ -184,11 +216,24 @@ describe('exports and scoring', () => {
       expect(existsSync(join(outDir, file))).toBe(true);
     }
     // Private evidence never leaves by default.
+    expect(existsSync(join(outDir, 'private-evidence.jsonl'))).toBe(false);
     const items = readFileSync(join(outDir, 'items.jsonl'), 'utf8');
     expect(items).not.toContain('compactText');
     expect(items).not.toContain('Invoice for infrastructure');
     const manifest = JSON.parse(readFileSync(join(outDir, 'manifest.json'), 'utf8')) as { synthetic: boolean };
     expect(manifest.synthetic).toBe(true);
+
+    // The opt-in path writes a clearly named private file — and only then.
+    const optInDir = mkdtempSync(join('/tmp/opencode', 'eval-export-private-'));
+    outDirs.push(optInDir);
+    const privateExport = await exportRun(calibrated, dataset.value, labels.value, {
+      outDir: optInDir,
+      includePrivateEvidence: true,
+    });
+    expect(privateExport.ok).toBe(true);
+    const privateEvidence = readFileSync(join(optInDir, 'private-evidence.jsonl'), 'utf8');
+    expect(privateEvidence).toContain('compactText');
+    expect(privateEvidence).toContain('Invoice for infrastructure');
 
     const report = scoreRun(calibrated, labels.value);
     expect(report.providers.rules?.classification?.total).toBe(8);

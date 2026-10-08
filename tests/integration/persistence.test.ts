@@ -33,6 +33,7 @@ const item: Item = {
   sourceId: root.id,
   sourceKind: 'filesystem',
   externalId: 'report-2026-q3.pdf',
+  displayName: 'report-2026-q3.pdf',
   revision: '1',
   snapshot: {
     device: root.device,

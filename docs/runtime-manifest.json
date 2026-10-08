@@ -68,7 +68,7 @@
     },
     "laya": {
       "status": "blocked",
-      "detail": "No ONNX checkpoint present on this machine (receptron/laya, ~1.7 GB FP32 English checkpoint per docs/08 S1). health() reports PROVIDEDR_FAILED/blocked. Real-model smoke tests recorded as blocked, not substituted."
+      "detail": "No ONNX checkpoint present on this machine (receptron/laya, ~1.7 GB FP32 English checkpoint per docs/08 S1). health() reports PROVIDER_FAILED/blocked. Real-model smoke tests recorded as blocked, not substituted."
     },
     "clef": {
       "status": "blocked",

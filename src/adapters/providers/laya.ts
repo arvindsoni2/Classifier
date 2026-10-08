@@ -29,6 +29,7 @@ export const LAYA_QUESTION_TOKEN_LIMIT = 192;
 export const LAYA_INPUT_TOKEN_LIMIT = 512;
 
 export class LayaProvider implements DecisionProvider {
+  readonly providerId = 'laya' as const;
   private readonly config: LayaConfig;
 
   constructor(config: LayaConfig = {}) {

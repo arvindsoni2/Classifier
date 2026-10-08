@@ -21,6 +21,7 @@ export class CollectionFixtureSource implements SourceAdapter {
       sourceId: 'source-fixture-collection',
       sourceKind: 'collection' as const,
       externalId: input.externalId,
+      displayName: input.displayName ?? input.externalId,
       revision: '1',
       snapshot: null,
       evidenceId: `evidence-${randomUUID()}`,

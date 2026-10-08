@@ -253,6 +253,23 @@ describe('ClefProvider (typed SystemOne endpoint)', () => {
     await broken.close();
   });
 
+  it('refuses a non-loopback endpoint even when configured (privacy boundary)', async () => {
+    const provider = new ClefProvider(
+      { endpoint: 'http://clef.example.com' },
+      { transport: okTransport() },
+    );
+    const health = await provider.health();
+    expect(health.ok).toBe(false);
+    if (!health.ok) {
+      expect(health.code).toBe('PROVIDER_FAILED');
+      expect(health.detail).toMatch(/loopback/i);
+    }
+    const decision = await provider.decide(request());
+    expect(decision.ok).toBe(false);
+    if (!decision.ok) expect(decision.detail).toMatch(/loopback/i);
+    await provider.close();
+  });
+
   it('health verifies a typed synthetic response and reports blocked endpoints', async () => {
     // The healthy transport answers whatever synthetic question it is asked.
     const typedTransport: ClefTransport = {
@@ -326,6 +343,53 @@ describe('JevProvider (cloud reference, consent required)', () => {
     expect(health.ok).toBe(false);
     if (!health.ok) expect(health.code).toBe('UNAUTHORISED');
     await provider.close();
+  });
+
+  it('refuses a non-loopback endpoint even when configured (privacy boundary)', async () => {
+    const provider = new JevProvider(
+      { consentReference: 'fixture-consent', endpoint: 'http://cloud.jev.example' },
+      { transport: { post: async () => ({ status: 200, body: systemOneAnswer() }) } },
+    );
+    const decision = await provider.decide(request());
+    expect(decision.ok).toBe(false);
+    if (!decision.ok) expect(decision.detail).toMatch(/loopback/i);
+    await provider.close();
+  });
+
+  it('retries once on transient failure exactly like clef', async () => {
+    let calls = 0;
+    const flaky: ClefTransport = {
+      post: async () => {
+        calls += 1;
+        if (calls === 1) throw new Error('ECONNRESET transient');
+        return { status: 200, body: systemOneAnswer() };
+      },
+    };
+    const provider = new JevProvider(
+      { consentReference: 'fixture-consent', endpoint: 'http://127.0.0.1:9/jev-fixture' },
+      { transport: flaky },
+    );
+    const decision = unwrapDecision(await provider.decide(request()));
+    expect(decision.provider).toBe('jev');
+    expect(calls).toBe(2);
+    await provider.close();
+
+    let deadCalls = 0;
+    const dead: ClefTransport = {
+      post: async () => {
+        deadCalls += 1;
+        throw new Error('ECONNREFUSED');
+      },
+    };
+    const broken = new JevProvider(
+      { consentReference: 'fixture-consent', endpoint: 'http://127.0.0.1:9/jev-fixture' },
+      { transport: dead },
+    );
+    const failed = await broken.decide(request());
+    expect(failed.ok).toBe(false);
+    if (!failed.ok) expect(failed.code).toBe('PROVIDER_FAILED');
+    expect(deadCalls).toBe(2);
+    await broken.close();
   });
 
   it('probes only after consent is recorded, using the injected transport', async () => {

@@ -169,7 +169,6 @@ describe('CollectionFixtureSource (FR-14 read-only second source)', () => {
     const source = new CollectionFixtureSource([{ externalId: 'bm-1' }]);
     expect(source.capabilities()).toEqual({ actions: [], recovery: 'none' });
   });
-
   it('discover yields normalised collection items without filesystem access', async () => {
     const source = new CollectionFixtureSource([{ externalId: 'bm-1' }, { externalId: 'bm-2' }]);
     const items = [];
@@ -191,6 +190,7 @@ describe('CollectionFixtureSource (FR-14 read-only second source)', () => {
       expect(item.snapshot).toBeNull();
       expect(item.revision).toBe('1');
       expect(item.evidenceId).toBeTruthy();
+      expect(item.displayName).toBeTruthy();
     }
     expect(new Set(items.map((i) => i.id)).size).toBe(2);
   });

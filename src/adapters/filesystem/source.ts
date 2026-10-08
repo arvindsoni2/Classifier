@@ -354,6 +354,7 @@ export class FilesystemSource implements SourceAdapter {
         sourceId: config.rootId,
         sourceKind: 'filesystem',
         externalId: name,
+        displayName: name,
         revision,
         snapshot: snap,
         evidenceId: null,
@@ -384,10 +385,12 @@ export class FilesystemSource implements SourceAdapter {
       try {
         entries = await readdir(current.path, { withFileTypes: true });
       } catch (e) {
-        if (isErrnoException(e) && e.code === 'EACCES') {
-          continue; // unreadable subtree: skip, keep reporting the rest
+        if (current.depth > 0 && isErrnoException(e) && e.code === 'EACCES') {
+          continue; // unreadable SUBTREE: skip, keep reporting the rest
         }
-        return err('OUT_OF_SCOPE', `cannot list ${current.path}: ${detailOf(e)}`);
+        // An unlistable ROOT is an explicit error: an empty catalogue would
+        // be indistinguishable from "the user has no folders".
+        return err('OUT_OF_SCOPE', `cannot list root ${current.path}: ${detailOf(e)}`);
       }
       for (const entry of entries) {
         if (entry.isSymbolicLink() || !entry.isDirectory()) continue;
@@ -406,7 +409,7 @@ export class FilesystemSource implements SourceAdapter {
         }
         const segments = [...current.segments, entry.name];
         destinations.push({
-          id: `dest-${sha(segments.join(' ')).slice(0, 40)}`,
+          id: `dest-${sha(JSON.stringify(segments)).slice(0, 40)}`,
           segments,
           device: st.dev.toString(),
           inode: st.ino.toString(),

@@ -129,6 +129,25 @@ function readJsonl(path: string): unknown[] {
     .map((line) => JSON.parse(line) as unknown);
 }
 
+/** Content hash over the frozen items (canonical JSON). */
+export function datasetHashOf(items: readonly EvalItem[]): string {
+  return sha256(
+    stableStringify(
+      items.map((item) => ({
+        itemId: item.itemId,
+        familyId: item.familyId,
+        externalId: item.externalId,
+        state: item.evidence.state,
+      })),
+    ),
+  );
+}
+
+/** Content hash over the frozen taxonomy (tree + destinations). */
+export function taxonomyFeatureHash(taxonomy: EvalTaxonomy): string {
+  return sha256(stableStringify({ tree: taxonomy.tree, destinations: taxonomy.destinations }));
+}
+
 /** Loads a frozen dataset directory: manifest.json + items.jsonl + taxonomy.json. */
 export function loadDataset(dir: string): Result<EvalDataset> {
   let manifest: EvalManifest;
@@ -153,33 +172,44 @@ export function loadDataset(dir: string): Result<EvalDataset> {
     return { ok: false, code: 'INVALID_DECISION', detail: 'dataset has no items' };
   }
   const seen = new Set<string>();
-  const items: EvalItem[] = itemLines.map((line) => {
+  const items: EvalItem[] = [];
+  for (const line of itemLines) {
     if (seen.has(line.itemId)) {
-      throw new Error(`duplicate itemId ${line.itemId}`);
+      return { ok: false, code: 'INVALID_DECISION', detail: `items.jsonl contains duplicate itemId ${line.itemId}` };
     }
     seen.add(line.itemId);
-    const evidence: Evidence = { ...line.evidence, stateHash: line.evidence.stateHash ?? sha256(stableStringify(line.evidence.state)) };
-    return { itemId: line.itemId, externalId: line.externalId, familyId: line.familyId, evidence, split: 'development' };
-  });
+    const evidence: Evidence = {
+      ...line.evidence,
+      stateHash: line.evidence.stateHash ?? sha256(stableStringify(line.evidence.state)),
+    };
+    items.push({
+      itemId: line.itemId,
+      externalId: line.externalId,
+      familyId: line.familyId,
+      evidence,
+      split: 'development',
+    });
+  }
 
   const splits = assignSplits(items, manifest.splitSeed);
   for (const item of items) {
     item.split = splits[item.itemId] ?? 'development';
   }
 
-  const datasetHash = sha256(
-    stableStringify(
-      items.map((item) => ({
-        itemId: item.itemId,
-        familyId: item.familyId,
-        externalId: item.externalId,
-        state: item.evidence.state,
-      })),
-    ),
-  );
-  const taxonomyHash = sha256(
-    stableStringify({ tree: taxonomy.tree, destinations: taxonomy.destinations }),
-  );
+  const datasetHash = datasetHashOf(items);
+  const taxonomyHash = taxonomyFeatureHash(taxonomy);
+
+  // A frozen dataset's manifest is authoritative: a mismatching hash means
+  // drift or tampering, never something to paper over.
+  if (manifest.datasetHash !== datasetHash || manifest.taxonomyHash !== taxonomyHash) {
+    return {
+      ok: false,
+      code: 'INVALID_DECISION',
+      detail:
+        'manifest hash mismatch: the dataset/taxonomy contents do not match manifest.datasetHash/taxonomyHash ' +
+        `(computed ${datasetHash.slice(0, 12)}…/${taxonomyHash.slice(0, 12)}…, expected ${manifest.datasetHash.slice(0, 12)}…/${manifest.taxonomyHash.slice(0, 12)}…)`,
+    };
+  }
 
   return { ok: true, value: { manifest, taxonomy, items, datasetHash, taxonomyHash } };
 }
@@ -201,18 +231,5 @@ export function loadLabels(dir: string): { ok: true; value: EvalLabels } | {
 }
 
 export function itemFeatureHash(items: readonly EvalItem[]): string {
-  return sha256(
-    stableStringify(
-      items.map((item) => ({
-        itemId: item.itemId,
-        familyId: item.familyId,
-        externalId: item.externalId,
-        state: item.evidence.state,
-      })),
-    ),
-  );
-}
-
-export function taxonomyFeatureHash(taxonomy: EvalTaxonomy): string {
-  return sha256(stableStringify({ tree: taxonomy.tree, destinations: taxonomy.destinations }));
+  return datasetHashOf(items);
 }

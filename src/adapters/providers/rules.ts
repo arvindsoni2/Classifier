@@ -61,6 +61,7 @@ function answerByRules(evidence: Evidence, question: ChoiceQuestion): ChoiceAnsw
 }
 
 export class RulesProvider implements DecisionProvider {
+  readonly providerId = 'rules' as const;
   async health(): Promise<Result<ProviderManifest>> {
     return ok({
       provider: 'rules',

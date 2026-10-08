@@ -58,6 +58,25 @@ export interface PairedDifference {
 }
 
 /**
+ * Bootstrap resampling of FAMILY UNITS with replacement (docs/05 §5):
+ * duplicate families are resampled as units; multiplicity is required for a
+ * true bootstrap distribution.
+ */
+export function resampleFamilies(
+  families: readonly string[],
+  count: number,
+  random: () => number,
+): string[] {
+  const picks: string[] = [];
+  if (families.length === 0) return picks;
+  const total = Math.max(1, count);
+  for (let i = 0; i < total; i++) {
+    picks.push(families[Math.floor(random() * families.length)] ?? families[0]!);
+  }
+  return picks;
+}
+
+/**
  * Family-aware paired bootstrap: resample duplicate families as units with
  * replacement and report the percentile interval of the accuracy difference.
  */
@@ -73,14 +92,9 @@ export function pairedBootstrapDifference(
   const random = mulberry32(seed);
   const deltas: number[] = [];
   for (let i = 0; i < resamples; i++) {
-    const sampled = new Set<string>();
-    const count = Math.max(1, families.length);
-    for (let j = 0; j < count; j++) {
-      const family = families[Math.floor(random() * families.length)];
-      if (family !== undefined) sampled.add(family);
-    }
-    const sampleA = itemsA.filter((item) => sampled.has(item.familyId));
-    const sampleB = itemsB.filter((item) => sampled.has(item.familyId));
+    const picks = resampleFamilies(families, families.length, random);
+    const sampleA = itemsA.filter((item) => picks.includes(item.familyId));
+    const sampleB = itemsB.filter((item) => picks.includes(item.familyId));
     deltas.push(accuracy(sampleA) - accuracy(sampleB));
   }
   deltas.sort((a, b) => a - b);
@@ -263,12 +277,11 @@ export function scoreRun(run: EvalRun, labels: EvalLabels): EvalReport {
       if (score === undefined || !predictions.some((row) => row.itemId === label.itemId)) continue;
       score.support += 1;
       const prediction = predictions.find((row) => row.itemId === label.itemId);
-      if (prediction?.predictedCategoryId === label.primaryCategoryId) score.predictedSupport += 1;
       if (prediction?.status === 'completed' && prediction.predictedCategoryId === label.primaryCategoryId) {
         score.correct += 1;
       }
     }
-    // Predictions with no matching label still count toward predicted support.
+    // Predicted support counts every prediction in that category exactly once.
     for (const row of predictions) {
       const score = row.predictedCategoryId === null ? undefined : perCategory.get(row.predictedCategoryId);
       if (score !== undefined) score.predictedSupport += 1;
@@ -331,6 +344,7 @@ export function scoreRun(run: EvalRun, labels: EvalLabels): EvalReport {
     }
 
     const runRow = run.providerRuns.find((row) => row.provider === provider);
+    const blocked = (runRow?.status ?? 'unknown') !== 'ok';
     const samples = [...(runRow?.warmedSamples ?? [])].sort((a, b) => a - b);
     const runtime: RuntimeReport = {
       elapsedTotalMs: runRow?.elapsedTotalMs ?? 0,
@@ -346,13 +360,13 @@ export function scoreRun(run: EvalRun, labels: EvalLabels): EvalReport {
       modelRevision: runRow?.modelRevision ?? 'unknown',
       runtimeRevision: runRow?.runtimeRevision ?? 'unknown',
       evidenceProfile: predictions[0]?.evidenceProfile ?? run.evidenceTreatment,
-      classification,
-      deferral,
-      probability,
+      classification: blocked ? null : classification,
+      deferral: blocked ? null : deferral,
+      probability: blocked ? null : probability,
       runtime,
     };
 
-    if ((runRow?.status ?? 'unknown') !== 'ok') {
+    if (blocked) {
       notes.push(
         `${provider}: blocked provider — health failed; every item is recorded as a failure and the provider is not dropped from the report`,
       );

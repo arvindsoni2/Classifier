@@ -21,6 +21,8 @@ export interface ChildRunResult {
 }
 
 const MAX_STDERR_CHARS = 4096;
+/** Parent-side cap on collected child stdout (child is rlimit-capped too). */
+const MAX_STDOUT_BYTES = 1024 * 1024;
 
 /** Spawns `prlimit --as=<memory> -- <command> <args...>` with piped stdio. */
 export function runChild(
@@ -37,6 +39,7 @@ export function runChild(
     );
 
     const stdoutChunks: Buffer[] = [];
+    let stdoutBytes = 0;
     let stderr = '';
     let timedOut = false;
 
@@ -46,7 +49,11 @@ export function runChild(
     }, options.timeoutMs);
 
     child.stdout.on('data', (chunk: Buffer) => {
-      stdoutChunks.push(chunk);
+      // Bound the parent-side buffer regardless of child behaviour.
+      if (stdoutBytes < MAX_STDOUT_BYTES) {
+        stdoutChunks.push(chunk);
+        stdoutBytes += chunk.length;
+      }
     });
     child.stderr.on('data', (chunk: Buffer) => {
       if (stderr.length < MAX_STDERR_CHARS) {

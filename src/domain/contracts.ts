@@ -67,6 +67,8 @@ export interface Item {
   sourceId: Id;
   sourceKind: 'filesystem' | 'collection';
   externalId: string;
+  /** Human-facing label derived from the source (basename for files). */
+  displayName: string;
   revision: string;
   snapshot: Snapshot | null;
   /**
@@ -259,6 +261,8 @@ export interface ProviderManifest {
 }
 
 export interface DecisionProvider {
+  /** Stable provider identity; never guessed from constructor names. */
+  readonly providerId: ProviderId;
   health(): Promise<Result<ProviderManifest>>;
   decide(request: DecisionRequest): Promise<Result<Decision>>;
   close(): Promise<void>;

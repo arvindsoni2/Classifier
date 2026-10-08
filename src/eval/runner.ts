@@ -268,8 +268,9 @@ export async function runEvaluation(
     if (!health.ok) {
       // Health failure blocks that provider's evaluation without dropping
       // it from reported results: every item is a recorded failure.
+      const providerId = provider.providerId;
       providerRuns.push({
-        provider: providerNameOf(provider),
+        provider: providerId,
         modelRevision: 'unknown',
         runtimeRevision: 'unknown',
         status: 'blocked',
@@ -284,7 +285,7 @@ export async function runEvaluation(
           itemId: item.itemId,
           familyId: item.familyId,
           split: item.split,
-          provider: providerNameOf(provider),
+          provider: providerId,
           modelRevision: 'unknown',
           runtimeRevision: 'unknown',
           evidenceProfile: config.evidenceTreatment,
@@ -361,15 +362,6 @@ export async function runEvaluation(
   };
 }
 
-function providerNameOf(provider: DecisionProvider): ProviderId {
-  const name = provider.constructor.name.toLowerCase();
-  if (name.includes('rules')) return 'rules';
-  if (name.includes('laya')) return 'laya';
-  if (name.includes('clef')) return 'clef';
-  if (name.includes('jev')) return 'jev';
-  return 'jev';
-}
-
 /**
  * Teacher-forced node calibration (docs/05 §5): each item is evaluated at
  * the nodes along its TRUE route, so upstream mistakes cannot contaminate
@@ -385,6 +377,12 @@ export async function appendNodeCalibration(
   options: { evidenceTreatment: EvalConfig['evidenceTreatment'] },
 ): Promise<EvalRun> {
   const nodePredictions = [...run.nodePredictions];
+  // Health is probed ONCE per provider, never per item×node.
+  const healthy: { provider: DecisionProvider; manifest: ProviderManifest }[] = [];
+  for (const provider of providers) {
+    const health = await provider.health();
+    if (health.ok) healthy.push({ provider, manifest: health.value });
+  }
 
   for (const item of dataset.items) {
     const label: EvalLabel | undefined = labels.labels[item.itemId];
@@ -407,10 +405,8 @@ export async function appendNodeCalibration(
       if (node === undefined || trueChild === undefined) continue;
       const children = childrenOf(dataset.taxonomy.tree, node.id);
 
-      for (const provider of providers) {
-        const health = await provider.health();
-        if (!health.ok) continue;
-        const request = buildMatchedRequest(treatEvidence(item.evidence, options.evidenceTreatment), { category: node, children }, [health.value]);
+      for (const { provider, manifest } of healthy) {
+        const request = buildMatchedRequest(treatEvidence(item.evidence, options.evidenceTreatment), { category: node, children }, [manifest]);
         if (!request.ok) continue;
         const result = await provider.decide(request.value);
         if (!result.ok) continue;
@@ -419,15 +415,14 @@ export async function appendNodeCalibration(
         nodePredictions.push({
           itemId: item.itemId,
           familyId: item.familyId,
-          provider: health.value.provider,
+          provider: manifest.provider,
           nodeId: node.id,
           questionId: answer.questionId,
           trueOptionId: trueChild.id,
           selectedId: answer.selectedId,
           probabilities: answer.probabilities,
         });
-      }
-    }
+      }    }
   }
 
   return { ...run, nodePredictions };

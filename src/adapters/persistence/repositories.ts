@@ -127,10 +127,17 @@ export function createRepositories(dbPath: string): Repositories {
   db.pragma('synchronous = FULL');
   db.pragma('foreign_keys = ON');
 
-  // Owner-only storage file. WAL/SHM sidecar files are transient and
-  // umask-controlled; the durable database file itself is never
-  // group/world-accessible.
+  // Owner-only storage file. WAL/SHM sidecars are created by this connection
+  // and re-chmod'd so evidence JSON never lands group/world-readable; they
+  // live for as long as this single-writer connection does.
   chmodSync(dbPath, 0o600);
+  for (const suffix of ['-wal', '-shm']) {
+    try {
+      chmodSync(`${dbPath}${suffix}`, 0o600);
+    } catch {
+      // Sidecar not created yet; it inherits these permissions on creation.
+    }
+  }
 
   db.exec(readFileSync(new URL('./schema.sql', import.meta.url), 'utf8'));
 

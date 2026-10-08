@@ -4,6 +4,7 @@ import {
   eceFiveBin,
   multiclassBrier,
   pairedBootstrapDifference,
+  resampleFamilies,
   scoreRun,
   wilsonInterval,
 } from '../../src/eval/metrics.js';
@@ -226,5 +227,40 @@ describe('metric primitives', () => {
 
     const tied = pairedBootstrapDifference(itemsA, itemsA);
     expect(tied.deltaCompletionAdjusted).toBe(0);
+  });
+
+  it('resamples families WITH REPLACEMENT (multiplicity required for a real bootstrap)', () => {
+    // A deterministic draw sequence: every draw lands on the last family, so
+    // a with-replacement resample yields 200 identical families.
+    const picks = resampleFamilies(['f1', 'f2'], 200, () => 0.999999);
+    expect(picks).toHaveLength(200);
+    expect(new Set(picks).size).toBe(1);
+    expect(picks[0]).toBe('f2');
+
+    // A uniform spread over many draws uses both families.
+    let index = 0;
+    const mixed = resampleFamilies(['f1', 'f2'], 200, () => {
+      const value = index % 2 === 0 ? 0.1 : 0.9;
+      index += 1;
+      return value;
+    });
+    expect(mixed).toHaveLength(200);
+    expect(new Set(mixed).size).toBe(2);
+  });
+
+  it('counts predicted support exactly once per category', () => {
+    // item-4 completed but predicted the WRONG category.
+    const wrongRun = goldenRun();
+    wrongRun.predictions[3] = prediction('item-4', 'family-b', 'completed', 'cat-media');
+    const report = scoreRun(wrongRun, labels);
+    const perCategory = report.providers.rules?.classification?.perCategory ?? [];
+    const media = perCategory.find((score) => score.categoryId === 'cat-media');
+    const invoices = perCategory.find((score) => score.categoryId === 'cat-invoices');
+    expect(invoices?.support).toBe(4);
+    expect(invoices?.predictedSupport).toBe(3);
+    expect(invoices?.correct).toBe(3);
+    // The one wrong prediction must not be double-counted.
+    expect(media?.predictedSupport).toBe(1);
+    expect(media?.correct).toBe(0);
   });
 });

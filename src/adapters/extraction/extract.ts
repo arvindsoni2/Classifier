@@ -198,6 +198,9 @@ function parsePdfRun(run: ChildRunResult, limits: ExtractionLimits): TextOutcome
   // Pages are separated by \f. We request maxPdfPages + 1 so a full run
   // proves whether the document has more pages than the budget.
   let pages = text.split('\f');
+  // pdftotext writes \f after every page, including the last: drop the empty
+  // trailing chunk so an exact budget match is not reported as truncation.
+  if (pages.length > 1 && pages[pages.length - 1] === '') pages.pop();
   let truncated = false;
   if (pages.length > limits.maxPdfPages) {
     pages = pages.slice(0, limits.maxPdfPages);
@@ -306,15 +309,33 @@ const XML_ENTITIES: Record<string, string> = {
   apos: "'",
 };
 
+/** Entities must reference real code points: no out-of-range or lone surrogates. */
+function invalidCodePoint(codePoint: number): boolean {
+  return (
+    !Number.isFinite(codePoint) ||
+    codePoint < 0 ||
+    codePoint > 0x10ffff ||
+    (codePoint >= 0xd800 && codePoint <= 0xdfff)
+  );
+}
+
 function decodeXmlEntities(text: string): string {
   return text.replace(/&(#x?[0-9a-fA-F]+|[a-zA-Z]+);/g, (match, entity: string) => {
     const named = XML_ENTITIES[entity];
     if (named !== undefined) return named;
     if (entity.startsWith('#x') || entity.startsWith('#X')) {
-      return String.fromCodePoint(Number.parseInt(entity.slice(2), 16));
+      const codePoint = Number.parseInt(entity.slice(2), 16);
+      if (invalidCodePoint(codePoint)) {
+        throw new RangeError(`invalid XML code point in entity ${match}`);
+      }
+      return String.fromCodePoint(codePoint);
     }
     if (entity.startsWith('#')) {
-      return String.fromCodePoint(Number.parseInt(entity.slice(1), 10));
+      const codePoint = Number.parseInt(entity.slice(1), 10);
+      if (invalidCodePoint(codePoint)) {
+        throw new RangeError(`invalid XML code point in entity ${match}`);
+      }
+      return String.fromCodePoint(codePoint);
     }
     return match;
   });
@@ -324,32 +345,55 @@ function decodeXmlEntities(text: string): string {
  * Forward-only scanner over word/document.xml: collects <w:t> text, tabs and
  * paragraph breaks without building a tree and without executing anything.
  * Relationships and scripts are never fetched; this scan cannot follow them.
+ * Tags are matched on their ELEMENT NAME, so <w:tbl>/<w:tr>/<w:tab> prefix
+ * relatives can never be mistaken for <w:t>/<w:tab/> runs.
  */
 function scanDocxText(xml: Buffer, budget: number): Result<string> {
   let text = '';
   let position = 0;
+  // <w:tab .../> means two different things in WordprocessingML: a tab
+  // character inside a run, and a tab-stop definition inside <w:tabs>.
+  let inTabs = false;
+  const raw = (start: number, end: number) => xml.toString('latin1', start, end);
+  const isTag = (start: number, end: number, name: string): boolean => {
+    // Matches exactly `<name>`, `<name attr...>` or the closing tag; never `<name...>`.
+    const pattern = new RegExp(`^</?${name}(?:\\s[^>]*)?/?>$`, 'i');
+    return pattern.test(raw(start, end));
+  };
   while (position < xml.length) {
     const open = xml.indexOf('<', position);
     if (open < 0) break;
     const close = xml.indexOf('>', open);
     if (close < 0) break;
-    const tag = xml.toString('utf8', open, close + 1);
-    if (tag.startsWith('</w:p>')) {
-      text += '\n';
-    } else if (tag.startsWith('<w:tab')) {
-      text += '\t';
-    } else if (tag.startsWith('<w:t') && !tag.endsWith('/>')) {
-      const end = xml.indexOf('</w:t>', close + 1);
-      if (end < 0) break;
-      text += decodeXmlEntities(xml.toString('utf8', close + 1, end));
-      position = end + 6;
+    const end = close + 1;
+    if (inTabs) {
+      // Only the closing tag exits the tab-definition block; everything
+      // inside it (including tab-stop definitions) is skipped as data.
+      if (raw(open, open + 9) === '</w:tabs>') inTabs = false;
+      position = end;
       continue;
     }
-    position = close + 1;
+    if (isTag(open, end, 'w:tabs')) {
+      inTabs = true;
+    } else if (isTag(open, end, 'w:p')) {
+      if (raw(open, open + 2) === '</') text += '\n';
+    } else if (isTag(open, end, 'w:tab')) {
+      text += '\t';
+    } else if (isTag(open, end, 'w:t')) {
+      const textClose = xml.indexOf('</w:t>', end);
+      if (textClose < 0) break;
+      text += decodeXmlEntities(xml.toString('utf8', end, textClose));
+      position = textClose + 6;
+      continue;
+    }
+    position = end;
   }
   if (text.length === 0) {
     return err('EXTRACTION_FAILED', 'DOCX contains no paragraph text in word/document.xml');
   }
+  // Each paragraph, including the last, closes with a separator: the final
+  // one is an artefact, not content.
+  if (text.endsWith('\n')) text = text.slice(0, -1);
   const capped = capUtf8(text, budget);
   return ok(capped.text);
 }
@@ -458,7 +502,12 @@ export function createExtractor(deps: ExtractorDeps = {}): Extractor {
         buildEvidence(item, textOutcomeToState({ status: 'failed', note: data.detail, truncated: false }, state)),
       );
     }
-    const scanned = scanDocxText(data.value, limits.maxTextBytes);
+    let scanned: Result<string>;
+    try {
+      scanned = scanDocxText(data.value, limits.maxTextBytes);
+    } catch (e) {
+      scanned = err('EXTRACTION_FAILED', `DOCX entity decoding failed: ${(e as Error).message}`);
+    }
     if (!scanned.ok) {
       return ok(
         buildEvidence(item, textOutcomeToState({ status: 'failed', note: scanned.detail, truncated: false }, state)),

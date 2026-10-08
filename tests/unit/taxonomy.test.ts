@@ -270,4 +270,36 @@ describe('buildMatchedRequest — requires_unknown_and_rejects_oversized_headers
     const again = unwrap(buildMatchedRequest(evidence, node, tightManifests));
     expect(again.evidence.stateHash).toBe(clipped.evidence.stateHash);
   });
+
+  it('rejects option descriptions above the twelve-token option budget (LLD §3)', () => {
+    const evidence = makeEvidence();
+    const wordyNode: TaxonomyNode = {
+      category: node.category,
+      children: node.children.map((child, index) => ({
+        ...child,
+        // Only one over-long option; the header total still fits.
+        description: index === 0 ? `word ${'padding '.repeat(20)}` : child.description,
+      })),
+    };
+    const manifests = [manifest({ provider: 'laya', questionTokenLimit: 512, inputTokenLimit: 2048 })];
+    const result = buildMatchedRequest(evidence, wordyNode, manifests);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe('INPUT_TOO_LONG');
+      expect(result.detail).toMatch(/option|twelve|12/i);
+    }
+  });
+
+  it('derives the request evidence id from its clipped state hash (no PK collision)', () => {
+    const longText = 'invoice words '.repeat(400);
+    const evidence = makeEvidence(longText);
+    const originalId = evidence.id;
+    const tight = [manifest({ provider: 'rules' }), manifest({ provider: 'laya', questionTokenLimit: 192, inputTokenLimit: 120 })];
+    const clipped = unwrap(buildMatchedRequest(evidence, node, tight));
+    expect(clipped.evidence.stateHash).not.toBe(evidence.stateHash);
+    expect(clipped.evidence.id).not.toBe(originalId);
+    const looser = [manifest({ provider: 'rules' })];
+    const capped = unwrap(buildMatchedRequest(evidence, node, looser));
+    expect(capped.evidence.id).not.toBe(clipped.evidence.id);
+  });
 });

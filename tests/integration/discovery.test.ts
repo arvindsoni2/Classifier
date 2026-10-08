@@ -136,6 +136,7 @@ describe('FilesystemSource.discover — only_lists_stable_direct_regular_files',
       expect(item.sourceKind).toBe('filesystem');
       expect(item.sourceId).toBe(config.rootId);
       expect(item.evidenceId).toBeNull();
+      expect(item.displayName).toBe(item.externalId);
       expect(item.id).toMatch(/^item-/);
       expect(item.revision).toMatch(/^[0-9a-f]{16,}$/);
     }
@@ -214,6 +215,25 @@ describe('FilesystemSource.discover — pagination', () => {
 });
 
 describe('FilesystemSource.discoverDirectories', () => {
+  it('reports an unreadable root as an error rather than an empty catalogue', async () => {
+    const fx = makeFixtureRoot('dirs-denied');
+    fixtures.push(fx);
+    putDirectory(fx.root, ['Documents']);
+    const source = new FilesystemSource({ clock: new FakeClock() });
+    const config = unwrap(await resolveRoot(fx.root));
+    chmodSync(fx.root, 0o000);
+    try {
+      const result = await source.discoverDirectories(config);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.code).toBe('OUT_OF_SCOPE');
+        expect(result.detail).toMatch(/cannot be listed|permission/i);
+      }
+    } finally {
+      chmodSync(fx.root, 0o700);
+    }
+  });
+
   it('discovers real directories to depth three, skipping symlinks, other mounts and unreadable subtrees', async () => {
     const fx = makeFixtureRoot('dirs');
     fixtures.push(fx);

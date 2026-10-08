@@ -37,6 +37,8 @@ export interface TaxonomyNode {
 
 export const MAX_CHILDREN_PER_NODE = 7;
 export const MAX_ROUTE_LEVELS = 4;
+/** LLD §3: option descriptions are capped at twelve tokenizer tokens. */
+export const OPTION_DESCRIPTION_TOKEN_LIMIT = 12;
 /** Initial compact-text cap inside a matched request (LLD §3). */
 export const COMPACT_TEXT_CHAR_CAP = 1200;
 
@@ -222,6 +224,15 @@ export function buildMatchedRequest(
       );
     }
   }
+  // LLD §3: option descriptions are capped at twelve tokenizer tokens.
+  for (const option of question.options) {
+    if (estimateTokens(option.description) > OPTION_DESCRIPTION_TOKEN_LIMIT) {
+      return err(
+        'INPUT_TOO_LONG',
+        `option ${JSON.stringify(option.id)} description exceeds the ${OPTION_DESCRIPTION_TOKEN_LIMIT}-token option-description limit`,
+      );
+    }
+  }
 
   // Copy the state; compact text starts at the 1200-character cap.
   const state: Record<string, unknown> = { ...evidence.state };
@@ -274,8 +285,13 @@ export function buildMatchedRequest(
   }
 
   const clippedStateHash = sha256(stableStringify(state));
+  // The id is derived from the CLIPPED state so the original and the clipped
+  // request evidence are distinct records (no primary-key collision when
+  // tasks later persist them).
+  const clippedId = `evidence-${sha256(`${evidence.itemId}|${clippedStateHash}`).slice(0, 40)}`;
   const clippedEvidence: Evidence = {
     ...evidence,
+    id: clippedId,
     profile: compactText === undefined ? 'metadata' : 'compact_text',
     state,
     stateHash: clippedStateHash,

@@ -11,6 +11,7 @@ import {
 import { runChild } from '../../src/adapters/extraction/worker.js';
 import {
   makeDocx,
+  makeDocxRaw,
   makePdf,
   makeScannedPdf,
   makeZip,
@@ -34,6 +35,7 @@ function makeItem(externalId: string): Item {
     sourceId: 'root-1',
     sourceKind: 'filesystem',
     externalId,
+    displayName: externalId,
     revision: 'r1',
     snapshot: null,
     evidenceId: null,
@@ -192,6 +194,79 @@ async function runWith(
     await handle.close();
   }
 }
+
+describe('extractEvidence — DOCX fidelity and hostile XML (review fixes)', () => {
+  it('extracts table cell text without leaking table tags', async () => {
+    const fx = fixture('docx-table');
+    const document =
+      '<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>' +
+      '<w:tbl><w:tr><w:tc><w:p><w:r><w:t>CellText</w:t></w:r></w:p></w:tc></w:tr></w:tbl>' +
+      '<w:p><w:r><w:t>AfterTable</w:t></w:r></w:p></w:body></w:document>';
+    putBinaryFile(fx.root, 'table.docx', makeDocxRaw(document));
+    const evidence = unwrap(await extract(fx, 'table.docx'));
+    expect(evidence.status).toBe('ready');
+    const text = String(evidence.state.compactText);
+    expect(text).toContain('CellText');
+    expect(text).toContain('AfterTable');
+    expect(text).not.toContain('<w:');
+  });
+
+  it('ignores tab-stop definitions while keeping tab characters', async () => {
+    const fx = fixture('docx-tabs');
+    const document =
+      '<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>' +
+      '<w:p><w:pPr><w:tabs><w:tab w:val="left" w:pos="709"/></w:tabs></w:pPr>' +
+      '<w:r><w:t>Before</w:t></w:r><w:r><w:tab/><w:t>After</w:t></w:r></w:p></w:body></w:document>';
+    putBinaryFile(fx.root, 'tabs.docx', makeDocxRaw(document));
+    const evidence = unwrap(await extract(fx, 'tabs.docx'));
+    expect(String(evidence.state.compactText)).toBe('Before\tAfter');
+  });
+
+  it('reports an out-of-range numeric entity as a failed status, never a throw', async () => {
+    const fx = fixture('docx-entity');
+    const document =
+      '<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>' +
+      '<w:p><w:r><w:t>&#1114112;</w:t></w:r></w:p></w:body></w:document>';
+    putBinaryFile(fx.root, 'bad-entity.docx', makeDocxRaw(document));
+    const evidence = unwrap(await extract(fx, 'bad-entity.docx'));
+    expect(evidence.status).toBe('failed');
+    expect(String(evidence.state.extractionNote)).toMatch(/entity|code point/i);
+  });
+
+  it('does not truncate a PDF at the exact page budget and counts pages exactly', async () => {
+    const fx = fixture('pdf-budget');
+    putBinaryFile(fx.root, 'one-page.pdf', makePdf([['only page']]));
+    const one = unwrap(await extract(fx, 'one-page.pdf'));
+    expect(one.state.pages).toBe(1);
+    expect(one.truncated).toBe(false);
+
+    const ten = makePdf(Array.from({ length: 10 }, (_, i) => [`PAGE ${String(i + 1).padStart(2, '0')} MARKER`]));
+    putBinaryFile(fx.root, 'ten-pages.pdf', ten);
+    const exact = unwrap(await extract(fx, 'ten-pages.pdf'));
+    expect(exact.state.pages).toBe(10);
+    expect(exact.truncated).toBe(false);
+
+    const eleven = makePdf(Array.from({ length: 11 }, (_, i) => [`PAGE ${String(i + 1).padStart(2, '0')} MARKER`]));
+    putBinaryFile(fx.root, 'eleven-pages.pdf', eleven);
+    const over = unwrap(await extract(fx, 'eleven-pages.pdf'));
+    expect(over.state.pages).toBe(10);
+    expect(over.truncated).toBe(true);
+  });
+
+  it('refuses a small compressed entry that declares an oversized uncompressed size', async () => {
+    const fx = fixture('docx-real-bomb');
+    // A few hundred bytes on disk; the central directory declares 21 MiB.
+    const bomb = makeZip([
+      { name: '[Content_Types].xml', data: '<?xml version="1.0"?><Types/>' },
+      { name: 'word/document.xml', data: `a${'x'.repeat(21 * 1024 * 1024)}`, method: 8 },
+    ]);
+    expect(bomb.length).toBeLessThan(64 * 1024);
+    putBinaryFile(fx.root, 'real-bomb.docx', bomb);
+    const evidence = unwrap(await extract(fx, 'real-bomb.docx'));
+    expect(evidence.status).toBe('failed');
+    expect(String(evidence.state.extractionNote)).toMatch(/uncompressed|budget/i);
+  });
+});
 
 describe('extractEvidence — explicit statuses for hostile and unsupported inputs', () => {
   it('reports invalid UTF-8 text as an explicit failure, never silent replacement', async () => {

@@ -15,6 +15,7 @@ import {
   type Decision,
   type DecisionProvider,
   type DecisionRequest,
+  type ProviderId,
   type ProviderManifest,
   type Result,
 } from '../../domain/contracts.js';
@@ -117,7 +118,38 @@ function fetchTransport(): ClefTransport {
   };
 }
 
+/**
+ * Privacy boundary (LLD §3 "explicitly configured loopback endpoint",
+ * AGENTS.md rule 9): provider endpoints must be loopback. Anything that
+ * would send local evidence off-machine is refused, never attempted.
+ */
+export function assertLoopbackEndpoint(endpoint: string): { ok: true } | { ok: false; detail: string } {
+  let parsed: URL;
+  try {
+    parsed = new URL(endpoint);
+  } catch {
+    return { ok: false, detail: `endpoint ${JSON.stringify(endpoint)} is not a valid URL` };
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return { ok: false, detail: `endpoint protocol ${parsed.protocol} is not http(s)` };
+  }
+  const host = parsed.hostname.toLowerCase();
+  const isLoopback =
+    host === '127.0.0.1' ||
+    host === 'localhost' ||
+    host === '::1' ||
+    /^127(\.\d{1,3}){3}$/.test(host);
+  if (!isLoopback) {
+    return {
+      ok: false,
+      detail: `endpoint ${JSON.stringify(endpoint)} is not loopback; refusing to send local evidence off-machine`,
+    };
+  }
+  return { ok: true };
+}
+
 export class ClefProvider implements DecisionProvider {
+  readonly providerId: ProviderId = 'clef';
   private readonly endpoint: string;
   private readonly transport: ClefTransport;
   private readonly deadlineMs: number;
@@ -126,6 +158,13 @@ export class ClefProvider implements DecisionProvider {
     this.endpoint = config.endpoint.replace(/\/+$/, '');
     this.transport = deps.transport ?? fetchTransport();
     this.deadlineMs = deps.deadlineMs ?? 120_000;
+  }
+
+  /** Returns a failed Result when the endpoint is not loopback. */
+  private guardEndpoint(): Result<void> {
+    const checked = assertLoopbackEndpoint(this.endpoint);
+    if (!checked.ok) return err('PROVIDER_FAILED', checked.detail);
+    return ok(undefined);
   }
 
   private withDeadline<T>(promise: Promise<T>, ms: number): Promise<T> {
@@ -149,6 +188,8 @@ export class ClefProvider implements DecisionProvider {
   }
 
   async health(): Promise<Result<ProviderManifest>> {
+    const guard = this.guardEndpoint();
+    if (!guard.ok) return guard;
     const probeQuestion: ChoiceQuestion = {
       id: 'q-synthetic-health',
       instruction: 'Synthetic health probe: select the category of this fixture invoice.',
@@ -203,6 +244,8 @@ export class ClefProvider implements DecisionProvider {
   }
 
   async decide(request: DecisionRequest): Promise<Result<Decision>> {
+    const guard = this.guardEndpoint();
+    if (!guard.ok) return guard;
     const question = request.questions[0];
     if (question === undefined) {
       return err('INVALID_DECISION', 'decision request contains no question');

@@ -139,6 +139,15 @@ export function makeZip(entries: readonly ZipEntry[]): Buffer {
   return Buffer.concat([...locals, centralDirectory, eocd]);
 }
 
+/** Builds a minimal DOCX (ZIP with word/document.xml) from raw XML. */
+export function makeDocxRaw(documentXml: string): Buffer {
+  return makeZip([
+    { name: '[Content_Types].xml', data: '<?xml version="1.0"?><Types/>' },
+    { name: '_rels/.rels', data: '<?xml version="1.0"?><Relationships/>' },
+    { name: 'word/document.xml', data: documentXml },
+  ]);
+}
+
 function escapeXml(text: string): string {
   return text
     .replaceAll('&', '&amp;')

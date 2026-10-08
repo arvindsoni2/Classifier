@@ -16,7 +16,7 @@ import {
   type ProviderManifest,
   type Result,
 } from '../../domain/contracts.js';
-import { parseSystemOneAnswer, type ClefTransport } from './clef.js';
+import { parseSystemOneAnswer, assertLoopbackEndpoint, type ClefTransport } from './clef.js';
 
 export const JEV_CHOICE_PATH = '/v1/choice';
 
@@ -33,6 +33,7 @@ export interface JevDeps {
 }
 
 export class JevProvider implements DecisionProvider {
+  readonly providerId = 'jev' as const;
   private readonly config: JevConfig;
   private readonly transport: ClefTransport | undefined;
   private readonly deadlineMs: number;
@@ -55,6 +56,10 @@ export class JevProvider implements DecisionProvider {
         'UNAUTHORISED',
         'Jev endpoint/transport not explicitly configured; disabled rather than guessed',
       );
+    }
+    const endpointCheck = assertLoopbackEndpoint(this.config.endpoint);
+    if (!endpointCheck.ok) {
+      return err('PROVIDER_FAILED', endpointCheck.detail);
     }
     return ok({ url: `${this.config.endpoint.replace(/\/+$/, '')}${JEV_CHOICE_PATH}`, transport: this.transport });
   }
@@ -113,43 +118,52 @@ export class JevProvider implements DecisionProvider {
       return err('INVALID_DECISION', 'decision request contains no question');
     }
     const startedAt = Date.now();
-    try {
-      const response = await guard.value.transport.post(
-        guard.value.url,
-        {
-          profile: request.evidence.profile,
-          evidence: request.evidence.state,
-          question,
-          taxonomyRevision: request.taxonomyRevision,
-          consentReference: this.config.consentReference,
-        },
-        { timeoutMs: this.deadlineMs },
-      );
-      if (response.status !== 200) {
-        return err('PROVIDER_FAILED', `endpoint returned HTTP ${response.status} for ${JEV_CHOICE_PATH}`);
+
+    // Same contract as Clef: at most one retry for a transient failure;
+    // HTTP error statuses are not retried.
+    let attempt = 0;
+    let lastError = 'unavailable';
+    while (attempt < 2) {
+      try {
+        const response = await guard.value.transport.post(
+          guard.value.url,
+          {
+            profile: request.evidence.profile,
+            evidence: request.evidence.state,
+            question,
+            taxonomyRevision: request.taxonomyRevision,
+            consentReference: this.config.consentReference,
+          },
+          { timeoutMs: this.deadlineMs },
+        );
+        if (response.status !== 200) {
+          return err('PROVIDER_FAILED', `endpoint returned HTTP ${response.status} for ${JEV_CHOICE_PATH}`);
+        }
+        const answer = parseSystemOneAnswer(response.body);
+        if (!answer.ok) return answer;
+        const validated = validateChoiceAnswer(answer.value, question);
+        if (!validated.ok) {
+          return err('INVALID_DECISION', `jev returned an invalid distribution: ${validated.detail}`);
+        }
+        const { modelRevision, ...choiceAnswer } = answer.value;
+        return ok({
+          id: `decision-${randomUUID()}`,
+          provider: 'jev',
+          modelRevision: modelRevision ?? 'unreported-by-endpoint',
+          runtimeRevision: 'jev-http',
+          evidenceHash: request.evidence.stateHash,
+          schemaHash: request.schemaHash,
+          answers: [choiceAnswer],
+          elapsedMs: Date.now() - startedAt,
+          tokenCounts: {},
+          error: null,
+        });
+      } catch (error) {
+        lastError = (error as Error).message;
+        attempt += 1;
       }
-      const answer = parseSystemOneAnswer(response.body);
-      if (!answer.ok) return answer;
-      const validated = validateChoiceAnswer(answer.value, question);
-      if (!validated.ok) {
-        return err('INVALID_DECISION', `jev returned an invalid distribution: ${validated.detail}`);
-      }
-      const { modelRevision, ...choiceAnswer } = answer.value;
-      return ok({
-        id: `decision-${randomUUID()}`,
-        provider: 'jev',
-        modelRevision: modelRevision ?? 'unreported-by-endpoint',
-        runtimeRevision: 'jev-http',
-        evidenceHash: request.evidence.stateHash,
-        schemaHash: request.schemaHash,
-        answers: [choiceAnswer],
-        elapsedMs: Date.now() - startedAt,
-        tokenCounts: {},
-        error: null,
-      });
-    } catch (error) {
-      return err('PROVIDER_FAILED', `jev decide failed: ${(error as Error).message}`);
     }
+    return err('PROVIDER_FAILED', `jev decide failed after one retry: ${lastError}`);
   }
 
   async close(): Promise<void> {}
