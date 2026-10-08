@@ -9,7 +9,14 @@
 import { createHash } from 'node:crypto';
 import type { FileHandle } from 'node:fs/promises';
 import { inflateRawSync } from 'node:zlib';
-import { err, ok, type Evidence, type Item, type Result } from '../../domain/contracts.js';
+import {
+  err,
+  ok,
+  stableStringify,
+  type Evidence,
+  type Item,
+  type Result,
+} from '../../domain/contracts.js';
 import { runChild, type ChildRunResult } from './worker.js';
 
 export const EXTRACTOR_REVISION = 'extract@1.0.0';
@@ -86,16 +93,6 @@ function detectFormat(basename: string): DetectedFormat {
 
 function sha256(input: string | Buffer): string {
   return createHash('sha256').update(input).digest('hex');
-}
-
-/** Stable JSON so identical state always hashes identically. */
-function stableStringify(value: unknown): string {
-  if (value === null || typeof value !== 'object') return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
-  const entries = Object.entries(value as Record<string, unknown>)
-    .filter(([, v]) => v !== undefined)
-    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stableStringify(v)}`).join(',')}}`;
 }
 
 interface EvidenceOutcome {

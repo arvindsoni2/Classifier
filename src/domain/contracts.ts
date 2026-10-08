@@ -37,6 +37,22 @@ export const err = <T = never>(code: ErrorCode, detail: string): Result<T> => ({
   detail,
 });
 
+/**
+ * Stable canonical JSON (sorted keys, arrays preserved) so identical state
+ * always hashes identically across extraction, taxonomy and providers.
+ */
+export function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(([, v]) => v !== undefined)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stableStringify(v)}`).join(',')}}`;
+}
+
+/** Reserved deferral option ID used by every routing question. */
+export const UNKNOWN_OPTION_ID = 'unknown';
+
 export interface Snapshot {
   device: string;
   inode: string;
@@ -53,7 +69,11 @@ export interface Item {
   externalId: string;
   revision: string;
   snapshot: Snapshot | null;
-  evidenceId: Id;
+  /**
+   * Discovery lists items before any evidence is extracted; null means no
+   * evidence record exists yet. Filled by the extraction stage.
+   */
+  evidenceId: Id | null;
 }
 
 export interface Evidence {
@@ -198,6 +218,21 @@ export interface ApprovedMove {
 
 export type ApprovedAction = ApprovedMove | ApprovedTag;
 export type ActionReceipt = MoveReceipt | TagReceipt;
+
+/**
+ * A destination folder beneath the organisation root. `segments` are the
+ * relative path components (depth 1..3); `device`/`inode` pin the directory
+ * identity. `status` distinguishes observed existing folders from reviewed
+ * additions; a `candidate` folder has no physical directory until accepted
+ * execution (FR-06).
+ */
+export interface Destination {
+  id: Id;
+  segments: string[];
+  device: string;
+  inode: string;
+  status: 'observed' | 'approved';
+}
 
 export interface SourceAdapter {
   capabilities(): SourceCapabilities;
