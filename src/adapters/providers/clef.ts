@@ -288,6 +288,7 @@ export class ClefProvider implements DecisionProvider {
         const { modelRevision, ...choiceAnswer } = answer.value;
         return ok({
           id: `decision-${randomUUID()}`,
+          itemId: request.evidence.itemId,
           provider: 'clef',
           modelRevision: modelRevision ?? 'unreported-by-endpoint',
           runtimeRevision: 'systemone-http',

@@ -148,6 +148,7 @@ export class JevProvider implements DecisionProvider {
         const { modelRevision, ...choiceAnswer } = answer.value;
         return ok({
           id: `decision-${randomUUID()}`,
+          itemId: request.evidence.itemId,
           provider: 'jev',
           modelRevision: modelRevision ?? 'unreported-by-endpoint',
           runtimeRevision: 'jev-http',

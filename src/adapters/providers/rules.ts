@@ -90,6 +90,7 @@ export class RulesProvider implements DecisionProvider {
     }
     return ok({
       id: `decision-${randomUUID()}`,
+      itemId: request.evidence.itemId,
       provider: 'rules',
       modelRevision: MODEL_REVISION,
       runtimeRevision: process.version,

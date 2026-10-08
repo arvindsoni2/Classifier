@@ -121,6 +121,7 @@ export interface ChoiceAnswer {
 
 export interface Decision {
   id: Id;
+  itemId: Id;
   provider: ProviderId;
   modelRevision: string;
   runtimeRevision: string;
@@ -156,6 +157,43 @@ export interface Approval {
   approvedAt: string;
   expiresAt: string;
   mode: 'apply' | 'undo';
+}
+
+/**
+ * Ordered node answers of a taxonomy route: one per level, at most four.
+ * A path ending at the unknown option or any non-existing node cannot be
+ * planned into a proposal (FR-05).
+ */
+export interface DecisionPath {
+  answers: { nodeId: Id; questionId: Id; selectedId: Id }[];
+}
+
+/** Current bound state an approval is validated against (FR-07). */
+export interface ApprovalContext {
+  taxonomyRevision: Revision;
+  policyRevision: Revision;
+  actions: { proposalId: Id; version: Revision }[];
+}
+
+/**
+ * A suggested new folder group (FR-06): members are examples, the label is
+ * controlled by the vocabulary, and NO physical folder exists until accepted
+ * execution. reviewState tracks the reviewed group-level decision.
+ */
+export interface FolderCandidate {
+  id: Id;
+  label: string;
+  members: Id[];
+  destinationParentId: Id | null;
+  reviewState: 'draft' | 'accepted' | 'rejected';
+  createdBy: 'suggestion' | 'user';
+}
+
+/** Controlled naming vocabulary for suggested folders. */
+export interface Vocabulary {
+  maxLabelLength: number;
+  labelPattern: string;
+  reservedNames: string[];
 }
 
 export interface MoveReceipt {
