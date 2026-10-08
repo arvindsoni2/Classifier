@@ -33,22 +33,24 @@
   },
   "providers": {
     "rules": {
-      "status": "in-process deterministic baseline",
-      "implementedInTask": 4
+      "status": "ok",
+      "detail": "in-process deterministic baseline; health probe green at build time (rules@1.0.0, runtime v22.23.2)"
     },
     "laya": {
       "status": "blocked",
-      "detail": "No ONNX checkpoint present on this machine (receptron/laya, ~1.7 GB FP32 English checkpoint per docs/08). Real-model smoke tests will be recorded as blocked, not substituted."
+      "detail": "No ONNX checkpoint present on this machine (receptron/laya, ~1.7 GB FP32 English checkpoint per docs/08 S1). health() reports PROVIDEDR_FAILED/blocked. Real-model smoke tests recorded as blocked, not substituted."
     },
     "clef": {
-      "status": "configured",
+      "status": "blocked",
       "endpoint": "http://127.0.0.1:11434",
       "configLocation": "config/local/providers.json (gitignored)",
-      "detail": "User-provided loopback endpoint; health probe verifies an actual typed POST /v1/systemone response on synthetic fixtures. 11434 is commonly an Ollama chat endpoint; a chat-only response is recorded as blocked, never substituted (docs/08, 'Local Clef runtime')."
+      "smokeDate": "2026-10-08",
+      "smokeResult": "blocked",
+      "detail": "POST /v1/systemone (typed synthetic invoice/category fixture) returned HTTP 400. Port 11434 serves an Ollama-style chat API: GET / -> 200; GET /v1/models lists clef-flash:9b-q8_0, ornith-1.5:9b, gemma4:12b, phi4-mini:latest. The dedicated typed SystemOne endpoint is NOT available, so no SystemOne-compatible comparison can run in this environment; per docs/07 the chat API is NOT substituted for SystemOne and no chat results are presented as SystemOne measurements. The model GGUF exists locally; a llama.cpp SystemOne server (ggml-org/llama.cpp PR 29831) would be the route to enable it — recorded as a configuration gap, not a product failure."
     },
     "jev": {
-      "status": "disabled",
-      "detail": "Requires explicit dataset cloud consent; no consent recorded (PRD §8, LLD §3)."
+      "status": "blocked",
+      "detail": "Requires explicit dataset cloud consent; no consent recorded (PRD §8, LLD §3). decide/health return UNAUTHORISED; endpoint is never guessed."
     }
   },
   "notes": [

@@ -14,7 +14,7 @@
     "lint": "eslint .",
     "build": "tsc -p tsconfig.build.json",
     "test:native": "node scripts/not-until-task.js native 7",
-    "doctor": "node scripts/not-until-task.js doctor 4",
+    "doctor": "node dist/cli/doctor.js",
     "eval:fixture": "node scripts/not-until-task.js eval-fixture 5"
   },
   "dependencies": {
