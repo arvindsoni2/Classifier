@@ -56,15 +56,26 @@ function request(compactText = 'fixture invoice text', basename?: string): Decis
   };
 }
 
-/** Well-formed SystemOne response fixture. */
-function systemOneAnswer(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+/** Well-formed SystemOne response fixture for the canonical question. */
+function systemOneResponse(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    questionId: 'q-root',
-    selectedId: 'cat-invoices',
-    probabilities: { 'cat-invoices': 0.82, 'cat-media': 0.08, unknown: 0.1 },
-    providerConfidence: 0.82,
+    model: 'clef-flash-fixture-gguf',
+    answers: {
+      'q-root': {
+        type: 'choice',
+        choice: 'cat-invoices',
+        probabilities: { 'cat-invoices': 0.82, 'cat-media': 0.08, unknown: 0.1 },
+        confidence: 0.82,
+      },
+    },
+    usage: { input_tokens: 120, output_tokens: 0 },
     ...overrides,
   };
+}
+
+/** Replaces only the canonical answer inside a response fixture. */
+function withAnswer(answer: Record<string, unknown>): Record<string, unknown> {
+  return { ...systemOneResponse(), answers: { 'q-root': answer } };
 }
 
 function unwrapDecision(result: Result<Decision>): Decision {
@@ -115,7 +126,7 @@ describe('RulesProvider (deterministic baseline)', () => {
 });
 
 describe('ClefProvider (typed SystemOne endpoint)', () => {
-  const okTransport = (body: Record<string, unknown> = systemOneAnswer()): ClefTransport => ({
+  const okTransport = (body: Record<string, unknown> = systemOneResponse()): ClefTransport => ({
     post: async () => ({ status: 200, body }),
   });
 
@@ -136,7 +147,12 @@ describe('ClefProvider (typed SystemOne endpoint)', () => {
       { endpoint: 'http://127.0.0.1:11434' },
       {
         transport: okTransport(
-          systemOneAnswer({ probabilities: { 'cat-invoices': 1, 'cat-media': 0 } }),
+          withAnswer({
+            type: 'choice',
+            choice: 'cat-invoices',
+            probabilities: { 'cat-invoices': 1, 'cat-media': 0 },
+            confidence: 1,
+          }),
         ),
       },
     );
@@ -151,7 +167,12 @@ describe('ClefProvider (typed SystemOne endpoint)', () => {
       { endpoint: 'http://127.0.0.1:11434' },
       {
         transport: okTransport(
-          systemOneAnswer({ probabilities: { 'cat-invoices': 0.5, 'cat-media': 0.2, unknown: 0.1 } }),
+          withAnswer({
+            type: 'choice',
+            choice: 'cat-invoices',
+            probabilities: { 'cat-invoices': 0.5, 'cat-media': 0.2, unknown: 0.1 },
+            confidence: 0.5,
+          }),
         ),
       },
     );
@@ -166,7 +187,12 @@ describe('ClefProvider (typed SystemOne endpoint)', () => {
       { endpoint: 'http://127.0.0.1:11434' },
       {
         transport: okTransport(
-          systemOneAnswer({ probabilities: { 'cat-invoices': Number.NaN, 'cat-media': 0, unknown: 1 } }),
+          withAnswer({
+            type: 'choice',
+            choice: 'cat-invoices',
+            probabilities: { 'cat-invoices': Number.NaN, 'cat-media': 0, unknown: 1 },
+            confidence: 0.5,
+          }),
         ),
       },
     );
@@ -181,9 +207,11 @@ describe('ClefProvider (typed SystemOne endpoint)', () => {
       { endpoint: 'http://127.0.0.1:11434' },
       {
         transport: okTransport(
-          systemOneAnswer({
-            selectedId: 'cat-media',
+          withAnswer({
+            type: 'choice',
+            choice: 'cat-media',
             probabilities: { 'cat-invoices': 0.82, 'cat-media': 0.08, unknown: 0.1 },
+            confidence: 0.82,
           }),
         ),
       },
@@ -197,13 +225,42 @@ describe('ClefProvider (typed SystemOne endpoint)', () => {
   it('rejects unexpected response fields rather than exposing provider output', async () => {
     const provider = new ClefProvider(
       { endpoint: 'http://127.0.0.1:11434' },
-      { transport: okTransport(systemOneAnswer({ suggestedPath: '/usr/bin/rm -rf' })) },
+      { transport: okTransport(systemOneResponse({ suggestedPath: '/usr/bin/rm -rf' })) },
     );
     const result = await provider.decide(request());
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.code).toBe('INVALID_DECISION');
     if (!result.ok) expect(result.detail).toContain('suggestedPath');
     await provider.close();
+  });
+
+  it('rejects an answer for the wrong question id, a non-choice type and unexpected answer fields', async () => {
+    const wrongQuestion = new ClefProvider(
+      { endpoint: 'http://127.0.0.1:11434' },
+      { transport: okTransport({ ...systemOneResponse(), answers: { 'q-other': { type: 'choice', choice: 'cat-invoices', probabilities: { 'cat-invoices': 1 }, confidence: 1 } } }) },
+    );
+    const wrongResult = await wrongQuestion.decide(request());
+    expect(wrongResult.ok).toBe(false);
+    if (!wrongResult.ok) expect(wrongResult.detail).toContain('q-root');
+    await wrongQuestion.close();
+
+    const scored = new ClefProvider(
+      { endpoint: 'http://127.0.0.1:11434' },
+      { transport: okTransport(withAnswer({ type: 'score', choice: 'cat-invoices', probabilities: { 'cat-invoices': 1 }, confidence: 1 })) },
+    );
+    const scoredResult = await scored.decide(request());
+    expect(scoredResult.ok).toBe(false);
+    if (!scoredResult.ok) expect(scoredResult.code).toBe('INVALID_DECISION');
+    await scored.close();
+
+    const sneaky = new ClefProvider(
+      { endpoint: 'http://127.0.0.1:11434' },
+      { transport: okTransport(withAnswer({ type: 'choice', choice: 'cat-invoices', probabilities: { 'cat-invoices': 1 }, confidence: 1, suggestedPath: '/usr/bin/rm -rf' })) },
+    );
+    const sneakyResult = await sneaky.decide(request());
+    expect(sneakyResult.ok).toBe(false);
+    if (!sneakyResult.ok) expect(sneakyResult.detail).toContain('suggestedPath');
+    await sneaky.close();
   });
 
   it('enforces the per-item deadline on a hanging endpoint', async () => {
@@ -229,7 +286,7 @@ describe('ClefProvider (typed SystemOne endpoint)', () => {
       post: async () => {
         calls += 1;
         if (calls === 1) throw new Error('ECONNRESET transient');
-        return { status: 200, body: systemOneAnswer() };
+        return { status: 200, body: systemOneResponse() };
       },
     };
     const provider = new ClefProvider({ endpoint: 'http://127.0.0.1:11434' }, { transport: flaky });
@@ -271,23 +328,28 @@ describe('ClefProvider (typed SystemOne endpoint)', () => {
   });
 
   it('health verifies a typed synthetic response and reports blocked endpoints', async () => {
-    // The healthy transport answers whatever synthetic question it is asked.
+    // The healthy transport answers whatever synthetic question it is asked,
+    // in the real SystemOne wire format.
     const typedTransport: ClefTransport = {
       post: async (_url, body) => {
-        const probeQuestion = (body as { question: ChoiceQuestion }).question;
-        const probabilities: Record<string, number> = {};
-        for (const option of probeQuestion.options) {
-          probabilities[option.id] = option === probeQuestion.options[0] ? 1 : 0;
-        }
-        return {
-          status: 200,
-          body: {
-            questionId: probeQuestion.id,
-            selectedId: probeQuestion.options[0]?.id,
+        const questions = (body as { questions: Record<string, { criteria: Record<string, string> }> }).questions;
+        const entry = Object.entries(questions)[0];
+        const answers: Record<string, unknown> = {};
+        if (entry !== undefined) {
+          const [questionId, question] = entry;
+          const optionIds = Object.keys(question.criteria);
+          const probabilities: Record<string, number> = {};
+          for (const optionId of optionIds) {
+            probabilities[optionId] = optionId === optionIds[0] ? 1 : 0;
+          }
+          answers[questionId] = {
+            type: 'choice',
+            choice: optionIds[0],
             probabilities,
-            providerConfidence: 1,
-          },
-        };
+            confidence: 1,
+          };
+        }
+        return { status: 200, body: { model: 'fixture-clef', answers, usage: { input_tokens: 42 } } };
       },
     };
     const healthy = new ClefProvider(
@@ -348,7 +410,7 @@ describe('JevProvider (cloud reference, consent required)', () => {
   it('refuses a non-loopback endpoint even when configured (privacy boundary)', async () => {
     const provider = new JevProvider(
       { consentReference: 'fixture-consent', endpoint: 'http://cloud.jev.example' },
-      { transport: { post: async () => ({ status: 200, body: systemOneAnswer() }) } },
+      { transport: { post: async () => ({ status: 200, body: systemOneResponse() }) } },
     );
     const decision = await provider.decide(request());
     expect(decision.ok).toBe(false);
@@ -362,7 +424,7 @@ describe('JevProvider (cloud reference, consent required)', () => {
       post: async () => {
         calls += 1;
         if (calls === 1) throw new Error('ECONNRESET transient');
-        return { status: 200, body: systemOneAnswer() };
+        return { status: 200, body: systemOneResponse() };
       },
     };
     const provider = new JevProvider(
@@ -397,7 +459,7 @@ describe('JevProvider (cloud reference, consent required)', () => {
     const transport: ClefTransport = {
       post: async () => {
         posted += 1;
-        return { status: 200, body: systemOneAnswer() };
+        return { status: 200, body: systemOneResponse() };
       },
     };
     const provider = new JevProvider(
@@ -436,23 +498,28 @@ describe('probeProviders (doctor)', () => {
   });
 
   it('reports a healthy clef endpoint as ok', async () => {
-    // A "correct SystemOne" simulator: answers whatever question it is asked.
+    // A "correct SystemOne" simulator: answers whatever question it is asked,
+    // in the real wire format (answers keyed by question id).
     const ok: ClefTransport = {
       post: async (_url, body) => {
-        const question = (body as { question: ChoiceQuestion }).question;
-        const probabilities: Record<string, number> = {};
-        for (const option of question.options) {
-          probabilities[option.id] = option === question.options[0] ? 1 : 0;
-        }
-        return {
-          status: 200,
-          body: {
-            questionId: question.id,
-            selectedId: question.options[0]?.id,
+        const questions = (body as { questions: Record<string, { criteria: Record<string, string> }> }).questions;
+        const entry = Object.entries(questions)[0];
+        const answers: Record<string, unknown> = {};
+        if (entry !== undefined) {
+          const [questionId, question] = entry;
+          const optionIds = Object.keys(question.criteria);
+          const probabilities: Record<string, number> = {};
+          for (const optionId of optionIds) {
+            probabilities[optionId] = optionId === optionIds[0] ? 1 : 0;
+          }
+          answers[questionId] = {
+            type: 'choice',
+            choice: optionIds[0],
             probabilities,
-            providerConfidence: 1,
-          },
-        };
+            confidence: 1,
+          };
+        }
+        return { status: 200, body: { model: 'fixture-clef', answers, usage: { input_tokens: 42 } } };
       },
     };
     const health = await probeProviders(

@@ -72,12 +72,32 @@
       "detail": "No ONNX checkpoint present on this machine (receptron/laya, ~1.7 GB FP32 English checkpoint per docs/08 S1). health() reports PROVIDER_FAILED/blocked. Real-model smoke tests recorded as blocked, not substituted."
     },
     "clef": {
-      "status": "blocked",
-      "endpoint": "http://127.0.0.1:11434",
+      "status": "ok",
+      "endpoint": "http://127.0.0.1:11435",
       "configLocation": "config/local/providers.json (gitignored)",
-      "smokeDate": "2026-10-08",
-      "smokeResult": "blocked",
-      "detail": "POST /v1/systemone (typed synthetic invoice/category fixture) returned HTTP 400. Port 11434 serves an Ollama-style chat API: GET / -> 200; GET /v1/models lists clef-flash:9b-q8_0, ornith-1.5:9b, gemma4:12b, phi4-mini:latest. The dedicated typed SystemOne endpoint is NOT available, so no SystemOne-compatible comparison can run in this environment; per docs/07 the chat API is NOT substituted for SystemOne and no chat results are presented as SystemOne measurements. The model GGUF exists locally; a llama.cpp SystemOne server (ggml-org/llama.cpp PR 29831) would be the route to enable it — recorded as a configuration gap, not a product failure."
+      "smokeDate": "2026-10-09",
+      "smokeResult": "pass",
+      "server": {
+        "implementation": "llama.cpp llama-server (dedicated SystemOne endpoint, ggml-org PR 29831, merged 2026-10-03)",
+        "sourceRevision": "ggml-org/llama.cpp 2c564f4 (2026-10-09, shallow clone)",
+        "buildPath": "/home/asoni/Downloads/Classifier/llama.cpp-systemone (sibling of the project; Release, GGML_NATIVE=ON, CPU)",
+        "binary": "build/bin/llama-server",
+        "runCommand": "./build/bin/llama-server --host 127.0.0.1 --port 11435 -m /home/asoni/Downloads/Classifier/models/Clef-Flash-Q4_K_M.gguf --ctx-size 4096 --threads 8 --log-disable",
+        "model": "Clef-Flash-Q4_K_M.gguf (Q4_K_M, 6.1 GB, ggml-org/Clef-Flash-GGUF)",
+        "whyNotOllama": "Port 11434 serves Ollama's OpenAI-compatible chat API only; POST /v1/systemone there is not the typed endpoint. The chat API is never substituted (docs/07, docs/08 'no assumed Ollama/LM Studio support')."
+      },
+      "healthSmoke": {
+        "fixture": "synthetic invoice/category question in SystemOne format",
+        "result": "200 with typed answer {choice, probabilities summing to 1, confidence}"
+      },
+      "decideSmoke": {
+        "fixture": "invoice-hosting-2026-01.pdf, 5-option root question",
+        "selectedId": "cat-invoices",
+        "probability": 0.9859,
+        "inputTokens": 254,
+        "elapsedMs": [24781, 23175, 22215],
+        "note": "CPU inference on 8 threads (Quadro P520 4 GB VRAM is too small for a 9B). Serial throughput ~2.6 items/min: a 200-item matched treatment is ~75 min per provider. Real laptop measurement, not a benchmark import."
+      }
     },
     "jev": {
       "status": "blocked",

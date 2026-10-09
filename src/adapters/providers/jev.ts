@@ -16,7 +16,7 @@ import {
   type ProviderManifest,
   type Result,
 } from '../../domain/contracts.js';
-import { parseSystemOneAnswer, assertLoopbackEndpoint, type ClefTransport } from './clef.js';
+import { parseSystemOneAnswer, assertLoopbackEndpoint, buildSystemOneRequest, type ClefTransport } from './clef.js';
 
 export const JEV_CHOICE_PATH = '/v1/choice';
 
@@ -76,21 +76,23 @@ export class JevProvider implements DecisionProvider {
       ],
     };
     try {
-      const response = await guard.value.transport.post(guard.value.url, {
-        profile: 'metadata',
-        evidence: {
-          basename: 'synthetic-jev-fixture.txt',
-          detectedFormat: 'text',
-          sizeBytes: 10,
-          compactText: 'synthetic fixture for health probe',
-        },
-        question: probeQuestion,
-        consentReference: this.config.consentReference,
-      }, { timeoutMs: this.deadlineMs });
+      const response = await guard.value.transport.post(
+        guard.value.url,
+        buildSystemOneRequest(
+          {
+            basename: 'synthetic-jev-fixture.txt',
+            detectedFormat: 'text',
+            sizeBytes: 10,
+            compactText: 'synthetic fixture for health probe',
+          },
+          probeQuestion,
+        ),
+        { timeoutMs: this.deadlineMs },
+      );
       if (response.status !== 200) {
         return err('PROVIDER_FAILED', `endpoint returned HTTP ${response.status} for ${JEV_CHOICE_PATH}`);
       }
-      const answer = parseSystemOneAnswer(response.body);
+      const answer = parseSystemOneAnswer(response.body, probeQuestion.id);
       if (!answer.ok) return err('PROVIDER_FAILED', `endpoint did not return a typed answer: ${answer.detail}`);
       const validated = validateChoiceAnswer(answer.value, probeQuestion);
       if (!validated.ok) {
@@ -127,19 +129,13 @@ export class JevProvider implements DecisionProvider {
       try {
         const response = await guard.value.transport.post(
           guard.value.url,
-          {
-            profile: request.evidence.profile,
-            evidence: request.evidence.state,
-            question,
-            taxonomyRevision: request.taxonomyRevision,
-            consentReference: this.config.consentReference,
-          },
+          buildSystemOneRequest(request.evidence.state, question),
           { timeoutMs: this.deadlineMs },
         );
         if (response.status !== 200) {
           return err('PROVIDER_FAILED', `endpoint returned HTTP ${response.status} for ${JEV_CHOICE_PATH}`);
         }
-        const answer = parseSystemOneAnswer(response.body);
+        const answer = parseSystemOneAnswer(response.body, question.id);
         if (!answer.ok) return answer;
         const validated = validateChoiceAnswer(answer.value, question);
         if (!validated.ok) {
