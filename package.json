@@ -13,7 +13,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint .",
     "build": "tsc -p tsconfig.build.json",
-    "test:native": "node scripts/not-until-task.js native 7",
+    "test:native": "cargo test --manifest-path native/fsops/Cargo.toml",
     "doctor": "node dist/cli/doctor.js",
     "eval:fixture": "node dist/eval/fixture.js"
   },

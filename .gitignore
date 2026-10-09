@@ -12,3 +12,6 @@ config/local/
 .env.*
 test-results/
 playwright-report/
+
+# Rust helper build output
+target/

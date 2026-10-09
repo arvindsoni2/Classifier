@@ -1,0 +1,15 @@
+[package]
+name = "fsops"
+version = "0.1.0"
+edition = "2024"
+description = "Anchored, non-overwriting Linux filesystem primitives for the Fedora Downloads organiser (openat2 + renameat2 RENAME_NOREPLACE). No shell, no delete verb."
+license = "MIT"
+
+[dependencies]
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+
+[profile.release]
+debug = false
