@@ -250,8 +250,9 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     return reply.send({ approval: result.value });
   });
 
-  // Mutation endpoints are BLOCKED until the verified executor is installed
-  // (plan Task 7/8). Classifier success never authorises a filesystem move.
+  // Mutation endpoints are BLOCKED until the verified executor and
+  // journalled apply are wired into the review workflow (plan Task 9).
+  // Classifier success never authorises a filesystem move.
   for (const path of [
     '/api/batches/:id/apply',
     '/api/batches/:id/resume',
@@ -262,7 +263,7 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
         reply,
         503,
         'UNSUPPORTED',
-        'filesystem execution is not installed yet: the verified anchored Linux helper (Task 7) and journalled executor (Task 8) are pending; classifier output cannot authorise moves',
+        'filesystem execution is not wired into the review workflow yet: the anchored helper and journalled executor are verified (Tasks 7-8), the application service wiring lands in Task 9; classifier output cannot authorise moves',
       ));
   }
 }

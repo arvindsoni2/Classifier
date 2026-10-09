@@ -136,12 +136,12 @@ Project scripts created in Task 1: `test` (Vitest), `test:e2e` (Playwright), `ty
 
 **Interfaces:** `applyBatch(batchId:Id,approvalId:Id,actionSetHash:Sha256):Promise<BatchResult>`, `resumeBatch(batchId:Id):Promise<BatchResult>`, `undoAction(actionId:Id,approvalId:Id):Promise<Result<MoveReceipt>>`, `reconcileAction(record:ActionRecord,observations:LocationObservations):Result<ReconcileOutcome>`. ApplicationService exposes these plus scan/classify/review/eval. Inject repositories, source/helper, clock and fault hook through constructor; no global filesystem access.
 
-- [ ] Write `crash_at_every_effect_boundary_recovers_without_duplicate_move`: faults before/after intent, mkdir, rename, verification and Applied commit. Matching source-only retries only on valid approval; target-only records Applied; both/neither/mismatch conflicts. An unrecorded mkdir identity requires destination review and leaves the directory intact.
-- [ ] Write `undo_refuses_changed_target_and_occupied_original`, `expired_approval_cannot_resume`, `duplicate_apply_returns_existing_receipt`, and `cancel_stops_between_actions`. Assert zero overwritten/lost bytes and explicit result per action.
-- [ ] Run execution/recovery tests; verify red assertions.
-- [ ] Implement writer lock, short claim transactions, intent events, helper receipts and reconciliation; separately approved reverse actions. Defer cross-mount/unsupported cases. Preserve created folders and ambiguous material.
-- [ ] Run suites, native tests and typecheck. Run fault matrix repeatedly only if nondeterminism/failures require it; attach results, not just pass counts.
-- [ ] Commit: `git add src/application tests` then `git commit -m "feat: persist and recover approved organisation actions"`.
+- [x] Write `crash_at_every_effect_boundary_recovers_without_duplicate_move`: faults before/after intent, mkdir, rename, verification and Applied commit. Matching source-only retries only on valid approval; target-only records Applied; both/neither/mismatch conflicts. An unrecorded mkdir identity requires destination review and leaves the directory intact.
+- [x] Write `undo_refuses_changed_target_and_occupied_original`, `expired_approval_cannot_resume`, `duplicate_apply_returns_existing_receipt`, and `cancel_stops_between_actions`. Assert zero overwritten/lost bytes and explicit result per action.
+- [x] Run execution/recovery tests; verify red assertions.
+- [x] Implement writer lock, short claim transactions, intent events, helper receipts and reconciliation; separately approved reverse actions. Defer cross-mount/unsupported cases. Preserve created folders and ambiguous material.
+- [x] Run suites, native tests and typecheck. Run fault matrix repeatedly only if nondeterminism/failures require it; attach results, not just pass counts.
+- [x] Commit: `git add src/application tests` then `git commit -m "feat: persist and recover approved organisation actions"`.
 
 **Milestone C review evidence:** syscall fixture results, concurrency limitations, journal event traces, recovery matrix and undo tests. Passing classification tests alone cannot release apply.
 

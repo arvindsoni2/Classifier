@@ -126,12 +126,13 @@ export class FilesystemSource implements SourceAdapter {
   }
 
   /**
-   * Honest capability for Milestone A: no mutation primitive exists yet.
-   * The move_file action is advertised only after the verified anchored
-   * Linux helper is installed (plan Task 7).
+   * Mutation capability: the anchored Linux helper (Task 7) and the
+   * journalled executor (Task 8) are verified, so the filesystem source
+   * advertises the reviewed move and its recovery mode. The HTTP surface
+   * still gates every apply through explicit approval.
    */
   capabilities(): SourceCapabilities {
-    return { actions: [], recovery: 'none' };
+    return { actions: ['move_file'], recovery: 'reconcile_and_reverse' };
   }
 
   async inspect(itemId: Id): Promise<Result<Snapshot>> {

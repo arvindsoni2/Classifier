@@ -12,7 +12,7 @@ import {
   probeFilesystem,
   undoAt,
 } from '../../src/adapters/filesystem/helper.js';
-import {
+import { FilesystemSource } from '../../src/adapters/filesystem/source.js';import {
   makeFixtureRoot,
   putDirectory,
   putFile,
@@ -121,6 +121,14 @@ describe('fsops helper bridge', () => {
     const denied = await probeFilesystem(wrongConfig, binary);
     expect(denied.ok).toBe(false);
     if (!denied.ok) expect(denied.code).toBe('OUT_OF_SCOPE');
+  });
+
+  it('advertises the verified mutation capability only after the executor', () => {
+    const source = new FilesystemSource();
+    expect(source.capabilities()).toEqual({
+      actions: ['move_file'],
+      recovery: 'reconcile_and_reverse',
+    });
   });
 
   it('inspects a file into a decimal-string snapshot', async () => {
