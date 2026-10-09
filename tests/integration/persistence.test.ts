@@ -79,6 +79,14 @@ describe('createRepositories', () => {
     expect(repos.batches.get(batch.id)?.id).toBe(batch.id);
   });
 
+  it('requests and lists cancellation state', () => {
+    const batch = repos.batches.create(root.id);
+    expect(repos.batches.get(batch.id)?.cancellationRequested).toBe(false);
+    repos.batches.requestCancel(batch.id);
+    expect(repos.batches.get(batch.id)?.cancellationRequested).toBe(true);
+    expect(repos.batches.listByRoot(root.id).map((entry) => entry.id)).toContain(batch.id);
+  });
+
   it('rejects proposals for unknown items (foreign keys enforced)', () => {
     expect(() =>
       repos.proposals.save({ ...proposal, id: 'proposal-orphan', itemId: 'item-missing' }),
@@ -86,6 +94,8 @@ describe('createRepositories', () => {
   });
 
   it('persists_unique_action_and_rolls_back_event_on_failure', () => {
+    repos.roots.insert(root);
+    const batch = repos.batches.create(root.id);
     repos.items.save(item, root.id);
 
     repos.proposals.save(proposal);
@@ -97,6 +107,7 @@ describe('createRepositories', () => {
 
     repos.approvals.insert({
       id: 'approval-1',
+      batchId: batch.id,
       actionSetHash: 'c'.repeat(64),
       taxonomyRevision: 1,
       policyRevision: 1,

@@ -74,6 +74,7 @@ CREATE TABLE IF NOT EXISTS proposals (
 
 CREATE TABLE IF NOT EXISTS approvals (
   id TEXT PRIMARY KEY,
+  batch_id TEXT NOT NULL REFERENCES batches(id),
   action_set_hash TEXT NOT NULL,
   taxonomy_revision INTEGER NOT NULL,
   policy_revision INTEGER NOT NULL,
@@ -111,6 +112,7 @@ CREATE TABLE IF NOT EXISTS overrides (
 
 CREATE TABLE IF NOT EXISTS folder_candidates (
   id TEXT PRIMARY KEY,
+  batch_id TEXT NOT NULL REFERENCES batches(id),
   label TEXT NOT NULL,
   members_json TEXT NOT NULL,
   destination_parent_id TEXT,

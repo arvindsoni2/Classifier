@@ -59,12 +59,22 @@ export interface ActionRecord {
 
 export interface ApprovalRecord {
   id: Id;
+  batchId: Id;
   actionSetHash: string;
   taxonomyRevision: Revision;
   policyRevision: Revision;
   selectedActionsJson: string;
   expiresAt: string;
   mode: 'apply' | 'undo';
+}
+
+export interface FolderCandidateRecord {
+  id: Id;
+  batchId: Id;
+  label: string;
+  membersJson: string;
+  destinationParentId: Id | null;
+  reviewState: string;
 }
 
 export interface ActionSaveInput {
@@ -77,18 +87,55 @@ export interface ActionSaveInput {
 }
 
 export interface Repositories {
-  roots: { insert(root: RootRecord): void };
+  roots: { insert(root: RootRecord): void; get(id: Id): RootRecord | null };
   items: { save(item: Item, rootId: Id): void };
-  batches: { create(rootId: Id): Batch; get(id: Id): Batch | null };
+  batches: {
+    create(rootId: Id): Batch;
+    get(id: Id): Batch | null;
+    requestCancel(id: Id): void;
+    listByRoot(rootId: Id): Batch[];
+  };
   proposals: { save(proposal: Proposal): void; get(id: Id): Proposal | null };
-  approvals: { insert(approval: ApprovalRecord): void };
+  approvals: {
+    insert(approval: ApprovalRecord): void;
+    get(id: Id): ApprovalRecord | null;
+    listByBatch(batchId: Id): ApprovalRecord[];
+  };
   actions: {
     save(input: ActionSaveInput): void;
     appendEvent(actionId: Id, event: ActionEvent): void;
     get(actionId: Id): ActionRecord | null;
+    find(proposalId: Id, proposalVersion: Revision, mode: 'apply' | 'undo'): ActionRecord | null;
+    listByApproval(approvalId: Id): ActionRecord[];
+    update(actionId: Id, update: { state: string; receiptJson?: string | null }): void;
+  };
+  folderCandidates: {
+    insert(candidate: FolderCandidateRecord): void;
+    listByBatch(batchId: Id): FolderCandidateRecord[];
+    updateState(id: Id, reviewState: string): void;
   };
   transaction<T>(fn: () => T): T;
   close(): void;
+}
+
+interface ApprovalRow {
+  id: string;
+  batch_id: string;
+  action_set_hash: string;
+  taxonomy_revision: number;
+  policy_revision: number;
+  selected_actions_json: string;
+  expires_at: string;
+  mode: string;
+}
+
+interface FolderCandidateRow {
+  id: string;
+  batch_id: string;
+  label: string;
+  members_json: string;
+  destination_parent_id: string | null;
+  review_state: string;
 }
 
 interface ProposalRow {
@@ -142,8 +189,14 @@ export function createRepositories(dbPath: string): Repositories {
   db.exec(readFileSync(new URL('./schema.sql', import.meta.url), 'utf8'));
 
   const insertRoot = db.prepare(
-    'INSERT INTO roots (id, canonical_path, device, inode, policy_revision) VALUES (?, ?, ?, ?, ?)',
+    `INSERT INTO roots (id, canonical_path, device, inode, policy_revision)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       device = excluded.device,
+       inode = excluded.inode,
+       policy_revision = excluded.policy_revision`,
   );
+  const getRoot = db.prepare('SELECT * FROM roots WHERE id = ?');
   const insertItem = db.prepare(
     `INSERT OR REPLACE INTO items (id, root_id, external_id, revision, snapshot_json)
      VALUES (?, ?, ?, ?, ?)`,
@@ -152,6 +205,12 @@ export function createRepositories(dbPath: string): Repositories {
     'INSERT INTO batches (id, root_id, stage, created_at, cancellation_requested) VALUES (?, ?, ?, ?, 0)',
   );
   const getBatch = db.prepare('SELECT * FROM batches WHERE id = ?');
+  const requestCancelBatch = db.prepare(
+    'UPDATE batches SET cancellation_requested = 1 WHERE id = ?',
+  );
+  const listBatchesByRoot = db.prepare(
+    'SELECT * FROM batches WHERE root_id = ? ORDER BY rowid',
+  );
   const insertProposal = db.prepare(
     `INSERT INTO proposals (id, item_id, version, category_id, destination_id, basename,
        expected_snapshot_json, taxonomy_revision, policy_revision, decision_ids_json, state)
@@ -169,20 +228,40 @@ export function createRepositories(dbPath: string): Repositories {
   );
   const getProposal = db.prepare('SELECT * FROM proposals WHERE id = ?');
   const insertApproval = db.prepare(
-    `INSERT INTO approvals (id, action_set_hash, taxonomy_revision, policy_revision,
+    `INSERT INTO approvals (id, batch_id, action_set_hash, taxonomy_revision, policy_revision,
        selected_actions_json, expires_at, mode)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  );  const getApproval = db.prepare('SELECT * FROM approvals WHERE id = ?');
+  const listApprovalsByBatch = db.prepare(
+    'SELECT * FROM approvals WHERE batch_id = ? ORDER BY rowid',
   );
   const insertAction = db.prepare(
     `INSERT INTO actions (id, proposal_id, version, approval_id, mode, state, receipt_json)
      VALUES (?, ?, ?, ?, ?, ?, NULL)`,
   );
   const getAction = db.prepare('SELECT * FROM actions WHERE id = ?');
+  const findAction = db.prepare(
+    'SELECT * FROM actions WHERE proposal_id = ? AND version = ? AND mode = ?',
+  );
+  const listActionsByApproval = db.prepare('SELECT * FROM actions WHERE approval_id = ?');
+  const updateAction = db.prepare(
+    'UPDATE actions SET state = ?, receipt_json = COALESCE(?, receipt_json) WHERE id = ?',
+  );
   const getEvents = db.prepare(
     'SELECT event, recorded_at FROM action_events WHERE action_id = ? ORDER BY seq',
   );
   const insertEvent = db.prepare(
     'INSERT INTO action_events (action_id, event, recorded_at, payload_hash) VALUES (?, ?, ?, ?)',
+  );
+  const insertFolderCandidate = db.prepare(
+    `INSERT INTO folder_candidates (id, batch_id, label, members_json, destination_parent_id, review_state)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  );
+  const listFolderCandidates = db.prepare(
+    'SELECT * FROM folder_candidates WHERE batch_id = ? ORDER BY rowid',
+  );
+  const updateFolderCandidateState = db.prepare(
+    'UPDATE folder_candidates SET review_state = ? WHERE id = ?',
   );
 
   const transaction = <T>(fn: () => T): T => db.transaction(fn)();
@@ -197,6 +276,19 @@ export function createRepositories(dbPath: string): Repositories {
           root.inode,
           root.policyRevision,
         );
+      },
+      get(id) {
+        const row = getRoot.get(id) as
+          | { id: string; canonical_path: string; device: string; inode: string; policy_revision: number }
+          | undefined;
+        if (row === undefined) return null;
+        return {
+          id: row.id,
+          canonicalPath: row.canonical_path,
+          device: row.device,
+          inode: row.inode,
+          policyRevision: row.policy_revision,
+        };
       },
     },
     items: {
@@ -234,6 +326,25 @@ export function createRepositories(dbPath: string): Repositories {
           createdAt: row.created_at,
           cancellationRequested: row.cancellation_requested !== 0,
         };
+      },
+      requestCancel(id) {
+        requestCancelBatch.run(id);
+      },
+      listByRoot(rootId) {
+        const rows = listBatchesByRoot.all(rootId) as {
+          id: string;
+          root_id: string;
+          stage: string;
+          created_at: string;
+          cancellation_requested: number;
+        }[];
+        return rows.map((row) => ({
+          id: row.id,
+          rootId: row.root_id,
+          stage: row.stage,
+          createdAt: row.created_at,
+          cancellationRequested: row.cancellation_requested !== 0,
+        }));
       },
     },
     proposals: {
@@ -274,6 +385,7 @@ export function createRepositories(dbPath: string): Repositories {
       insert(approval) {
         insertApproval.run(
           approval.id,
+          approval.batchId,
           approval.actionSetHash,
           approval.taxonomyRevision,
           approval.policyRevision,
@@ -281,6 +393,33 @@ export function createRepositories(dbPath: string): Repositories {
           approval.expiresAt,
           approval.mode,
         );
+      },
+      get(id) {
+        const row = getApproval.get(id) as ApprovalRow | undefined;
+        if (row === undefined) return null;
+        return {
+          id: row.id,
+          batchId: row.batch_id,
+          actionSetHash: row.action_set_hash,
+          taxonomyRevision: row.taxonomy_revision,
+          policyRevision: row.policy_revision,
+          selectedActionsJson: row.selected_actions_json,
+          expiresAt: row.expires_at,
+          mode: row.mode as 'apply' | 'undo',
+        };
+      },
+      listByBatch(batchId) {
+        const rows = listApprovalsByBatch.all(batchId) as ApprovalRow[];
+        return rows.map((row) => ({
+          id: row.id,
+          batchId: row.batch_id,
+          actionSetHash: row.action_set_hash,
+          taxonomyRevision: row.taxonomy_revision,
+          policyRevision: row.policy_revision,
+          selectedActionsJson: row.selected_actions_json,
+          expiresAt: row.expires_at,
+          mode: row.mode as 'apply' | 'undo',
+        }));
       },
     },
     actions: {
@@ -319,6 +458,66 @@ export function createRepositories(dbPath: string): Repositories {
           receiptJson: row.receipt_json,
           events,
         };
+      },
+      find(proposalId, proposalVersion, mode) {
+        const row = findAction.get(proposalId, proposalVersion, mode) as ActionRow | undefined;
+        if (row === undefined) return null;
+        const eventRows = getEvents.all(row.id) as EventRow[];
+        return {
+          id: row.id,
+          proposalId: row.proposal_id,
+          proposalVersion: row.version,
+          mode: row.mode as 'apply' | 'undo',
+          approvalId: row.approval_id,
+          state: row.state,
+          receiptJson: row.receipt_json,
+          events: eventRows.map((eventRow) => ({
+            event: eventRow.event as ActionEventKind,
+            recordedAt: eventRow.recorded_at,
+          })),
+        };
+      },
+      listByApproval(approvalId) {
+        const rows = listActionsByApproval.all(approvalId) as ActionRow[];
+        return rows.map((row) => ({
+          id: row.id,
+          proposalId: row.proposal_id,
+          proposalVersion: row.version,
+          mode: row.mode as 'apply' | 'undo',
+          approvalId: row.approval_id,
+          state: row.state,
+          receiptJson: row.receipt_json,
+          events: [],
+        }));
+      },
+      update(actionId, update) {
+        updateAction.run(update.state, update.receiptJson ?? null, actionId);
+      },
+    },
+    folderCandidates: {
+      insert(candidate) {
+        insertFolderCandidate.run(
+          candidate.id,
+          candidate.batchId,
+          candidate.label,
+          candidate.membersJson,
+          candidate.destinationParentId,
+          candidate.reviewState,
+        );
+      },
+      listByBatch(batchId) {
+        const rows = listFolderCandidates.all(batchId) as FolderCandidateRow[];
+        return rows.map((row) => ({
+          id: row.id,
+          batchId: row.batch_id,
+          label: row.label,
+          membersJson: row.members_json,
+          destinationParentId: row.destination_parent_id,
+          reviewState: row.review_state,
+        }));
+      },
+      updateState(id, reviewState) {
+        updateFolderCandidateState.run(reviewState, id);
       },
     },
     transaction,
