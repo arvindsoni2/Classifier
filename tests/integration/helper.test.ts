@@ -248,6 +248,78 @@ describe('fsops helper bridge', () => {
     expect(existsSync(join(fx.root, 'Documents', 'invoice.txt'))).toBe(false);
   });
 
+  it('defers a real cross-mount move (EXDEV) when a second mount sits under the root', () => {
+    const binary = ensureHelperBinary();
+    const fx = fixture('real-crossmount');
+    putDirectory(fx.root, ['Remote']);
+    putFile(fx.root, 'invoice.txt', 'do not cross\n');
+
+    // A real second mount inside the root: the helper must refuse rather
+    // than copy/delete across the boundary. Requires unprivileged user
+    // namespaces; when unavailable the fixture is reported as blocked,
+    // exactly as the plan specifies.
+    const probe = spawnSync('unshare', ['--user', '--map-root-user', '--mount', 'true'], {
+      encoding: 'utf8',
+    });
+    if (probe.error !== undefined || probe.status !== 0) {
+      throw new Error(
+        'cross-mount fixture BLOCKED: unprivileged mount namespaces are unavailable on this machine; ' +
+          'the EXDEV path stays unverified and apply on real cross-mounts remains deferred',
+      );
+    }
+
+    const rootSt = statSync(fx.root, { bigint: true });
+    const config = {
+      rootId: 'root-xmount',
+      absolutePath: fx.root,
+      device: rootSt.dev.toString(),
+      inode: rootSt.ino.toString(),
+      inboxDepth: 0,
+      directoryDepth: 3,
+      policyRevision: 1,
+    } satisfies RootConfig;
+    const request = JSON.stringify({
+      verb: 'move',
+      root: config,
+      actionId: 'action-xmount',
+      requestId: 'request-xmount',
+      sourceBasename: 'invoice.txt',
+      destination: { segments: ['Remote'], device: rootSt.dev.toString(), inode: rootSt.ino.toString() },
+      expected: {
+        device: rootSt.dev.toString(),
+        inode: rootSt.ino.toString(),
+        size: '10',
+        mtimeNs: '0',
+        ctimeNs: '0',
+        sha256: '0',
+      },
+      approvalId: 'approval-1',
+    });
+
+    const moved = spawnSync(
+      'unshare',
+      [
+        '--user',
+        '--map-root-user',
+        '--mount',
+        'sh',
+        '-c',
+        `mount -t tmpfs none "$1/Remote" && printf %s "$2" | "$3"`,
+        'sh',
+        fx.root,
+        request,
+        binary,
+      ],
+      { encoding: 'utf8', timeout: 60_000 },
+    );
+    expect(moved.error).toBeUndefined();
+    const response = JSON.parse(moved.stdout) as { ok: boolean; code?: string };
+    expect(response.ok).toBe(false);
+    expect(response.code).toBe('CROSS_MOUNT');
+    expect(readFileSync(join(fx.root, 'invoice.txt'), 'utf8')).toBe('do not cross\n');
+    expect(existsSync(join(fx.root, 'Remote', 'invoice.txt'))).toBe(false);
+  });
+
   it('reports a clear failure when the helper binary is missing', async () => {
     const fx = fixture('missing-helper');
     const result = await probeFilesystem(config(fx), '/nonexistent/fsops-binary');

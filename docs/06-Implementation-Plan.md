@@ -44,11 +44,11 @@ Project scripts created in Task 1: `test` (Vitest), `test:e2e` (Playwright), `ty
 
 **Interfaces:** Produces the LLD types and `createRepositories(dbPath:string):Repositories`. Repositories expose `batches.create(rootId:Id):Batch`, `proposals.save(p:Proposal):void`, `actions.appendEvent(actionId:Id,event:ActionEvent):void`, `actions.get(actionId:Id):ActionRecord|null`, and transaction wrapper `transaction<T>(fn:()=>T):T`. Define Batch/ActionEvent/ActionRecord and repository contracts next to the persisted types; event states match the LLD. Add `CollectionFixtureSource implements SourceAdapter` with read-only capability (actions empty, recovery none); catalogue/decision services must consume normalised items without filesystem access. Tag execution is an extension shape only and stays disabled.
 
-- [ ] Write `rejects_probability_nan_and_precision_loss` and `persists_unique_action_and_rolls_back_event_on_failure`. Assert that NaN/unknown IDs fail schema validation, decimal stat strings survive roundtrip, duplicate `(proposal,version,mode)` fails, and rollback leaves zero new events.
-- [ ] Run `pnpm test -- tests/unit/contracts.test.ts tests/integration/persistence.test.ts`; verify those behavioural failures.
-- [ ] Implement contracts, schema/migrations and repository boundary. Set foreign keys/WAL/FULL; owner-only storage. Verify current Node/package compatibility and pin resolved dependencies.
-- [ ] Run the two tests, `pnpm typecheck`, and fixture source contract test. Record actual versions, not placeholder runtime claims.
-- [ ] Commit: `git add package.json pnpm-lock.yaml src tests ui docs/runtime-manifest.json` then `git commit -m "feat: establish organiser contracts and catalogue"` (include only files actually created).
+- [x] Write `rejects_probability_nan_and_precision_loss` and `persists_unique_action_and_rolls_back_event_on_failure`. Assert that NaN/unknown IDs fail schema validation, decimal stat strings survive roundtrip, duplicate `(proposal,version,mode)` fails, and rollback leaves zero new events.
+- [x] Run `pnpm test -- tests/unit/contracts.test.ts tests/integration/persistence.test.ts`; verify those behavioural failures.
+- [x] Implement contracts, schema/migrations and repository boundary. Set foreign keys/WAL/FULL; owner-only storage. Verify current Node/package compatibility and pin resolved dependencies.
+- [x] Run the two tests, `pnpm typecheck`, and fixture source contract test. Record actual versions, not placeholder runtime claims.
+- [x] Commit: `git add package.json pnpm-lock.yaml src tests ui docs/runtime-manifest.json` then `git commit -m "feat: establish organiser contracts and catalogue"` (include only files actually created).
 
 ### Task 2: Scoped discovery and snapshots
 
@@ -56,11 +56,11 @@ Project scripts created in Task 1: `test` (Vitest), `test:e2e` (Playwright), `ty
 
 **Interfaces:** Consumes RootConfig/Item/Snapshot/Result. Produces `resolveRoot(configuredPath?:string):Promise<Result<RootConfig>>`, `FilesystemSource.discover(config:RootConfig):AsyncIterable<Result<Item>>`, `discoverDirectories(config:RootConfig):Promise<Result<Destination[]>>`, `snapshot(pathHandle:FileHandle):Promise<Result<Snapshot>>`. Destination is opaque ID, relative segments, device/inode and approved/observed status.
 
-- [ ] Write `only_lists_stable_direct_regular_files`. Build top-level normal/Unicode/`$(touch marker).txt` files, nested files, symlinks, `.part`, multi-hardlink and oversize fixtures. Assert only stable eligible direct files enter the candidate set; others have exclusions/reasons; no marker is created.
-- [ ] Run `pnpm test -- tests/integration/discovery.test.ts`; verify expected failure.
-- [ ] Implement read-only discovery, two observations five seconds apart via an injectable clock, 200-item pagination and depth-three directory discovery. Large files are listed but excluded from executable candidates. Opt-in sampling is explicit configuration.
-- [ ] Run discovery suite with outside-root byte snapshots unchanged. Include root replacement and permission-denied cases.
-- [ ] Commit: `git add src/adapters/filesystem tests` then `git commit -m "feat: discover scoped Downloads candidates"`.
+- [x] Write `only_lists_stable_direct_regular_files`. Build top-level normal/Unicode/`$(touch marker).txt` files, nested files, symlinks, `.part`, multi-hardlink and oversize fixtures. Assert only stable eligible direct files enter the candidate set; others have exclusions/reasons; no marker is created.
+- [x] Run `pnpm test -- tests/integration/discovery.test.ts`; verify expected failure.
+- [x] Implement read-only discovery, two observations five seconds apart via an injectable clock, 200-item pagination and depth-three directory discovery. Large files are listed but excluded from executable candidates. Opt-in sampling is explicit configuration.
+- [x] Run discovery suite with outside-root byte snapshots unchanged. Include root replacement and permission-denied cases.
+- [x] Commit: `git add src/adapters/filesystem tests` then `git commit -m "feat: discover scoped Downloads candidates"`.
 
 ### Task 3: Bounded extraction
 
@@ -68,11 +68,11 @@ Project scripts created in Task 1: `test` (Vitest), `test:e2e` (Playwright), `ty
 
 **Interfaces:** Consumes Item and safely opened input handles. Produces `extractEvidence(item:Item, input:ReadableInput, limits:ExtractionLimits):Promise<Result<Evidence>>`. ReadableInput is an adapter-owned handle/stream, not an arbitrary UI path. Defaults match PRD.
 
-- [ ] Write `caps_text_and_reports_unsupported_timeout_and_zip_budget`. Assert extracted text <=16 KiB, no more than ten PDF pages, explicit truncated flags, scanned/encrypted PDF metadata status, malformed DOCX failure and DOCX inflated bytes capped at 20 MiB.
-- [ ] Run `pnpm test -- tests/integration/extraction.test.ts`; verify assertions fail before implementation.
-- [ ] Implement UTF-8 decoding, bounded DOCX XML and pinned pdftotext worker using argument arrays, ten-second limit and 512 MiB resource limit. Disable relationship fetching and executable content. Record extractor revision.
-- [ ] Run extraction suite, including shell-like filenames and document instructions to ignore policy. Assert no network request or executable action results.
-- [ ] Commit: `git add src/adapters/extraction tests` then `git commit -m "feat: extract bounded local document evidence"`.
+- [x] Write `caps_text_and_reports_unsupported_timeout_and_zip_budget`. Assert extracted text <=16 KiB, no more than ten PDF pages, explicit truncated flags, scanned/encrypted PDF metadata status, malformed DOCX failure and DOCX inflated bytes capped at 20 MiB.
+- [x] Run `pnpm test -- tests/integration/extraction.test.ts`; verify assertions fail before implementation.
+- [x] Implement UTF-8 decoding, bounded DOCX XML and pinned pdftotext worker using argument arrays, ten-second limit and 512 MiB resource limit. Disable relationship fetching and executable content. Record extractor revision.
+- [x] Run extraction suite, including shell-like filenames and document instructions to ignore policy. Assert no network request or executable action results.
+- [x] Commit: `git add src/adapters/extraction tests` then `git commit -m "feat: extract bounded local document evidence"`.
 
 ### Task 4: Taxonomy, providers and doctor
 
@@ -80,12 +80,12 @@ Project scripts created in Task 1: `test` (Vitest), `test:e2e` (Playwright), `ty
 
 **Interfaces:** Produces `validateTaxonomy(tree:Category[], destinations:Destination[]):Result<Taxonomy>`, `buildMatchedRequest(evidence:Evidence,node:Category,manifests:ProviderManifest[]):Result<DecisionRequest>`, and DecisionProvider implementations. Taxonomy is revision/tree/mappingHash. Doctor produces `probeProviders(config:ProviderConfig):Promise<ProviderHealth[]>`.
 
-- [ ] Write `requires_unknown_and_rejects_oversized_headers`. Assert <=7 children plus unknown, <=4 route levels, immutable category IDs, explicit failure for cycles/invalid destinations and provider headers that exceed actual tokenizer limits. Preserve identical evidence hashes across matched treatments.
-- [ ] Write provider contract fixtures: distribution with missing ID, sum 0.8, NaN, selected nonmaximum, timeout and correct SystemOne response. Assert invalid decisions defer; cloud adapter requires consent.
-- [ ] Run taxonomy/provider tests and verify behavioural failures.
-- [ ] Implement virtual grouping, vocabulary candidates and exact-token request validation. Pin Laya model/tokenizer; probe Clef `/v1/systemone` using synthetic state. Do not substitute chat completion. Build retry/deadline handling and explicit Jev opt-in configuration.
-- [ ] Run contract tests. Run optional real-model smoke tests on synthetic material and record pass/blocked status separately; fixture tests cannot claim a laptop model passed.
-- [ ] Commit: `git add src/domain/taxonomy.ts src/adapters/providers src/cli/doctor.ts tests docs/runtime-manifest.json` then `git commit -m "feat: add typed local decision providers"`.
+- [x] Write `requires_unknown_and_rejects_oversized_headers`. Assert <=7 children plus unknown, <=4 route levels, immutable category IDs, explicit failure for cycles/invalid destinations and provider headers that exceed actual tokenizer limits. Preserve identical evidence hashes across matched treatments.
+- [x] Write provider contract fixtures: distribution with missing ID, sum 0.8, NaN, selected nonmaximum, timeout and correct SystemOne response. Assert invalid decisions defer; cloud adapter requires consent.
+- [x] Run taxonomy/provider tests and verify behavioural failures.
+- [x] Implement virtual grouping, vocabulary candidates and exact-token request validation. Pin Laya model/tokenizer; probe Clef `/v1/systemone` using synthetic state. Do not substitute chat completion. Build retry/deadline handling and explicit Jev opt-in configuration.
+- [x] Run contract tests. Run optional real-model smoke tests on synthetic material and record pass/blocked status separately; fixture tests cannot claim a laptop model passed.
+- [x] Commit: `git add src/domain/taxonomy.ts src/adapters/providers src/cli/doctor.ts tests docs/runtime-manifest.json` then `git commit -m "feat: add typed local decision providers"`.
 
 ### Task 5: Frozen evaluation runner
 
@@ -93,11 +93,11 @@ Project scripts created in Task 1: `test` (Vitest), `test:e2e` (Playwright), `ty
 
 **Interfaces:** `loadDataset(path:string):Result<EvalDataset>`, `runEvaluation(dataset:EvalDataset,providers:DecisionProvider[],config:EvalConfig):Promise<EvalRun>`, `scoreRun(run:EvalRun,labels:EvalLabels):EvalReport`. Define all evaluation types and consent/evidence treatments in dataset.ts. Reports preserve failures and support.
 
-- [ ] Write a four-item golden report: 3 correct completed predictions out of 4, one provider failure. Assert completion-adjusted accuracy=0.75, conditional accuracy=1, completion=0.75; perfect per-node one-hot predictions have Brier=0. Also assert split assignment keeps duplicate families together and model input excludes labels.
-- [ ] Run `pnpm test -- tests/unit/metrics.test.ts tests/integration/eval.test.ts`; verify expected failures.
-- [ ] Implement JSONL exports, family-aware bootstrap, Wilson intervals, five-bin ECE, per-node versus full-route separation, serial timing and manifest hashing. Mark fixture results synthetic; no invented hardware performance.
-- [ ] Run tests and `pnpm eval:fixture`. Verify deterministic synthetic report and valid manifest. An optional real run needs user-labelled data and actual machine runtime manifest.
-- [ ] Commit: `git add src/eval tests` then `git commit -m "feat: add reproducible decision evaluation"`.
+- [x] Write a four-item golden report: 3 correct completed predictions out of 4, one provider failure. Assert completion-adjusted accuracy=0.75, conditional accuracy=1, completion=0.75; perfect per-node one-hot predictions have Brier=0. Also assert split assignment keeps duplicate families together and model input excludes labels.
+- [x] Run `pnpm test -- tests/unit/metrics.test.ts tests/integration/eval.test.ts`; verify expected failures.
+- [x] Implement JSONL exports, family-aware bootstrap, Wilson intervals, five-bin ECE, per-node versus full-route separation, serial timing and manifest hashing. Mark fixture results synthetic; no invented hardware performance.
+- [x] Run tests and `pnpm eval:fixture`. Verify deterministic synthetic report and valid manifest. An optional real run needs user-labelled data and actual machine runtime manifest.
+- [x] Commit: `git add src/eval tests` then `git commit -m "feat: add reproducible decision evaluation"`.
 
 **Milestone A review evidence:** read-only fixture checks, limits validation, real-provider health status, synthetic eval report and architecture conformance. Codex reviews before widening to mutation work.
 
@@ -109,12 +109,12 @@ Project scripts created in Task 1: `test` (Vitest), `test:e2e` (Playwright), `ty
 
 **Interfaces:** `planPlacement(item:Item,path:DecisionPath,taxonomy:Taxonomy):Result<Proposal>`, `suggestFolderGroups(items:Item[],decisions:Decision[],vocabulary:Vocabulary):FolderCandidate[]`, `createApproval(batch:Batch,selected:Proposal[],mode:'apply'|'undo',now:Date):Result<Approval>`, `validateApproval(approval:Approval,current:ApprovalContext,now:Date):Result<void>`, `buildServer(service:ApplicationService,session:SessionConfig):FastifyInstance`. DecisionPath is ordered node answers; ApprovalContext contains exact versions/revisions/hash. All defined in domain contracts.
 
-- [ ] Write `unknown_cannot_plan_and_taxonomy_change_invalidates_approval`: unknown yields no proposal; two selected versions hash consistently; version/taxonomy mismatch gives STALE; 24-hour expiry rejects. Candidate groups require >=3 members unless userRequested.
-- [ ] Write `cross_site_mutations_are_rejected`: unauthenticated request and active-session evil Origin yield 403; allowed session still needs exact approval. Evidence/filenames are response data, not HTML; sensitive tokens never logged.
-- [ ] Run planner/security tests; verify behavioural failures.
-- [ ] Implement proposed paths from approved mappings, explicit override preview, revision changes, random one-time login token, strict cookies/Origin/Host/CSP and LLD endpoints. Mutation endpoints return blocked until the verified executor is installed.
-- [ ] Run tests and `pnpm typecheck`. Confirm port binding is loopback only and occupied port fails clearly.
-- [ ] Commit: `git add src/domain src/http tests` then `git commit -m "feat: create authenticated review and approval service"`.
+- [x] Write `unknown_cannot_plan_and_taxonomy_change_invalidates_approval`: unknown yields no proposal; two selected versions hash consistently; version/taxonomy mismatch gives STALE; 24-hour expiry rejects. Candidate groups require >=3 members unless userRequested.
+- [x] Write `cross_site_mutations_are_rejected`: unauthenticated request and active-session evil Origin yield 403; allowed session still needs exact approval. Evidence/filenames are response data, not HTML; sensitive tokens never logged.
+- [x] Run planner/security tests; verify behavioural failures.
+- [x] Implement proposed paths from approved mappings, explicit override preview, revision changes, random one-time login token, strict cookies/Origin/Host/CSP and LLD endpoints. Mutation endpoints return blocked until the verified executor is installed.
+- [x] Run tests and `pnpm typecheck`. Confirm port binding is loopback only and occupied port fails clearly.
+- [x] Commit: `git add src/domain src/http tests` then `git commit -m "feat: create authenticated review and approval service"`.
 
 ## Milestone C — executor and recovery on synthetic fixtures
 
@@ -124,11 +124,11 @@ Project scripts created in Task 1: `test` (Vitest), `test:e2e` (Playwright), `ty
 
 **Interfaces:** Native JSON request/receipt implements LLD verbs. TypeScript exposes `probeFilesystem(root:RootConfig):Promise<Result<FilesystemHealth>>`, `inspectAt(root:RootConfig,segments:string[]):Promise<Result<Snapshot>>`, `moveAt(action:ApprovedMove):Promise<Result<MoveReceipt>>`, `mkdirAt(root:RootConfig,parent:Destination,segment:string):Promise<Result<Destination>>`. No delete/shell verb.
 
-- [ ] Write native fixtures `no_replace_preserves_existing_target`, `symlink_ancestor_cannot_escape`, `cross_mount_is_deferred`, `unsupported_primitives_disable_apply`, `source_swap_reports_conflict`, `unicode_and_shell_names_are_literal`, `hardlink_and_oversize_are_rejected`. Assert target/original bytes preserved where appropriate and outside sentinel unchanged.
-- [ ] Run `cargo test --manifest-path native/fsops/Cargo.toml`; establish behavioural red tests using a compilable stub before implementation.
-- [ ] Implement descriptor-based openat2 restrictions, pinned root/destination identities, RENAME_NOREPLACE, bounded hashing, post-verification and directory fsync. Map kernel errors explicitly. Source-swap test expects conflict detection, not a fictional atomic identity guarantee.
-- [ ] Run native suite and `pnpm test -- tests/integration/helper.test.ts`; attach kernel/filesystem context. Cross-mount integration requires a real suitable fixture capability; if absent, report blocked and keep apply disabled for that unverified environment until the check is run.
-- [ ] Commit: `git add native src/adapters/filesystem/helper.ts tests` then `git commit -m "feat: add anchored non-overwriting Linux moves"`.
+- [x] Write native fixtures `no_replace_preserves_existing_target`, `symlink_ancestor_cannot_escape`, `cross_mount_is_deferred`, `unsupported_primitives_disable_apply`, `source_swap_reports_conflict`, `unicode_and_shell_names_are_literal`, `hardlink_and_oversize_are_rejected`. Assert target/original bytes preserved where appropriate and outside sentinel unchanged.
+- [x] Run `cargo test --manifest-path native/fsops/Cargo.toml`; establish behavioural red tests using a compilable stub before implementation.
+- [x] Implement descriptor-based openat2 restrictions, pinned root/destination identities, RENAME_NOREPLACE, bounded hashing, post-verification and directory fsync. Map kernel errors explicitly. Source-swap test expects conflict detection, not a fictional atomic identity guarantee.
+- [x] Run native suite and `pnpm test -- tests/integration/helper.test.ts`; attach kernel/filesystem context. Cross-mount integration requires a real suitable fixture capability; if absent, report blocked and keep apply disabled for that unverified environment until the check is run.
+- [x] Commit: `git add native src/adapters/filesystem/helper.ts tests` then `git commit -m "feat: add anchored non-overwriting Linux moves"`.
 
 ### Task 8: Journalled execution, resume and conditional undo
 
