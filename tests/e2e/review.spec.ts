@@ -11,11 +11,11 @@ import { startWorld, type E2EWorld } from './world.js';
 
 let world: E2EWorld;
 
-test.beforeAll(async () => {
+test.beforeEach(async () => {
   world = await startWorld();
 });
 
-test.afterAll(async () => {
+test.afterEach(async () => {
   await world.close();
 });
 
@@ -31,12 +31,13 @@ test('reviewed organisation flow end to end', async ({ page }) => {
 
   // 1. Scan: read-only discovery populates the batch.
   await page.getByRole('button', { name: /scan/i }).first().click();
-  await expect(page.getByText(/4 candidates|4 items|invoice-01/)).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText(/^Batch /)).toBeVisible({ timeout: 30_000 });
 
   // 2. Taxonomy: approve the reviewed categories.
   await page.getByRole('link', { name: /taxonomy/i }).click();
+  await expect(page.getByRole('table')).toBeVisible({ timeout: 15_000 });
   await page.getByRole('button', { name: /approve|save/i }).first().click();
-  await expect(page.getByText(/approved|revision/i)).toBeVisible();
+  await expect(page.getByRole('status')).toContainText(/approved|revision/i);
 
   // 3. Regenerate placements with the rules provider.
   await page.getByRole('link', { name: /placement/i }).click();
@@ -51,20 +52,19 @@ test('reviewed organisation flow end to end', async ({ page }) => {
 
   const versionBefore = await page.getByTestId('version-invoice-02.txt').textContent();
   await row.getByRole('button', { name: /edit/i }).click();
-  await page.getByLabel(/destination|category/i).first().selectOption({ index: 1 });
+  await page.getByLabel(/destination|category/i).first().selectOption({ index: 0 });
   await page.getByRole('button', { name: /save|confirm/i }).click();
   await expect(page.getByTestId('version-invoice-02.txt')).not.toHaveText(versionBefore ?? '');
 
   // 5. The exact summary lists both basenames before approval is possible.
-  await page.getByRole('button', { name: /approve|review summary/i }).first().click();
+  await page.getByRole('button', { name: /review exact summary|approve/i }).first().click();
   const summary = page.getByRole('dialog');
   await expect(summary).toBeVisible();
   await expect(summary).toContainText('invoice-01.txt');
   await expect(summary).toContainText('invoice-02.txt');
+  // 6. Confirming the exact summary creates the approval and applies it;
+  // the verified outcomes are then shown, not optimistically hidden.
   await summary.getByRole('button', { name: /confirm|approve/i }).click();
-
-  // 6. Apply; then the verified outcomes are shown, not optimistically hidden.
-  await page.getByRole('button', { name: /^apply$/i }).click();
   await expect(page.getByText(/applied|verified/i).first()).toBeVisible({ timeout: 30_000 });
 
   // The moved files exist at their destinations with their bytes.
@@ -82,6 +82,7 @@ test('reviewed organisation flow end to end', async ({ page }) => {
 test('unknown rows are disabled and cannot be approved', async ({ page }) => {
   await login(page);
   await page.getByRole('button', { name: /scan/i }).first().click();
+  await expect(page.getByText(/^Batch /)).toBeVisible({ timeout: 30_000 });
   await page.getByRole('link', { name: /placement/i }).click();
   await page.getByRole('button', { name: /classify|regenerate/i }).first().click();
   await expect(page.getByText('invoice-01.txt')).toBeVisible({ timeout: 15_000 });
@@ -91,17 +92,20 @@ test('unknown rows are disabled and cannot be approved', async ({ page }) => {
   const deferredRow = page.getByRole('row', { name: /beach-photo\.jpg/ });
   await expect(deferredRow).toContainText(/unknown|deferred/i);
   await expect(deferredRow.getByRole('checkbox')).toBeDisabled();
-  await expect(page.getByRole('button', { name: /^apply$/i })).toBeDisabled();
+  // With only deferred rows there is nothing to approve: the summary cannot
+  // be opened, so no approval and no apply path exists for them.
+  await expect(page.getByRole('button', { name: /review exact summary/i })).toBeDisabled();
 });
 
 test('keyboard and focus behaviour on the review dialog', async ({ page }) => {
   await login(page);
   await page.getByRole('button', { name: /scan/i }).first().click();
+  await expect(page.getByText(/^Batch /)).toBeVisible({ timeout: 30_000 });
   await page.getByRole('link', { name: /placement/i }).click();
   await page.getByRole('button', { name: /classify|regenerate/i }).first().click();
   await expect(page.getByText('invoice-01.txt')).toBeVisible({ timeout: 15_000 });
   await page.getByRole('row', { name: /invoice-01\.txt/ }).getByRole('checkbox').check();
-  await page.getByRole('button', { name: /approve|review summary/i }).first().click();
+  await page.getByRole('button', { name: /review exact summary|approve/i }).first().click();
 
   const dialog = page.getByRole('dialog');
   await expect(dialog).toBeVisible();

@@ -63,11 +63,13 @@ const LOGIN_FORM = `<!doctype html>
 <body>
 <h1>Fedora organiser</h1>
 <p>Enter the one-time token shown when the server started.</p>
-<form method="post" action="/login">
+<form id="login-form" method="post" action="/login">
 <label for="token">Token</label>
 <input id="token" name="token" type="password" autocomplete="off" required>
 <button type="submit">Sign in</button>
 </form>
+<p id="login-error" role="alert" hidden>That token was not accepted.</p>
+<script src="/app/login.js" defer></script>
 </body>
 </html>
 `;
@@ -170,7 +172,7 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
       return sendError(reply, 401, 'UNAUTHORISED', 'the bootstrap token was not accepted');
     }
     reply.header('set-cookie', sessionCookie(sessionId, sessionLifetimeMs, reply.raw));
-    return reply.send({ ok: true });
+    return reply.redirect('/app/');
   });
 
   app.post('/logout', async (request, reply) => {
@@ -185,10 +187,11 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
 
   app.post('/api/batches', async (request, reply) => {
     const body = request.body as { rootId?: unknown };
-    if (typeof body?.rootId !== 'string' || body.rootId.length === 0) {
-      return sendError(reply, 400, 'INVALID_DECISION', 'rootId is required');
+    if (body?.rootId !== undefined && typeof body.rootId !== 'string') {
+      return sendError(reply, 400, 'INVALID_DECISION', 'rootId must be a string when present');
     }
-    const result = await service.createBatch(body.rootId);
+    const rootId = typeof body?.rootId === 'string' ? body.rootId : '';
+    const result = await service.createBatch(rootId);
     if (!result.ok) return sendError(reply, statusForError(result.code), result.code, result.detail);
     return reply.send({ batch: result.value });
   });

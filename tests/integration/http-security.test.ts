@@ -107,7 +107,7 @@ async function startServer(service: ApplicationService, overrides: Partial<Sessi
     payload: { token },
     headers: { origin },
   });
-  expect(login.statusCode).toBe(200);
+  expect([200, 302, 303]).toContain(login.statusCode);
   const rawSetCookie = login.headers['set-cookie'];
   const setCookie = typeof rawSetCookie === 'string' ? rawSetCookie : Array.isArray(rawSetCookie) ? (rawSetCookie[0] ?? '') : '';
   const cookie = setCookie.split(';')[0] ?? '';
@@ -230,7 +230,7 @@ describe('cross_site_mutations_are_rejected', () => {
     expect(wrong.statusCode).toBe(401);
 
     const right = await instance.inject({ method: 'POST', url: '/login', payload: { token }, headers: { origin } });
-    expect(right.statusCode).toBe(200);
+    expect([200, 302, 303]).toContain(right.statusCode);
     const rawSetCookie = right.headers['set-cookie'];
     const cookieHeader = typeof rawSetCookie === 'string' ? rawSetCookie : Array.isArray(rawSetCookie) ? (rawSetCookie[0] ?? '') : '';
     expect(cookieHeader).toMatch(/HttpOnly/i);

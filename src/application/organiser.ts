@@ -58,6 +58,8 @@ export interface ClassifyResult {
   deferred: number;
   failed: number;
   provider: string;
+  /** Basenames the provider deferred (unknown/insufficient evidence). */
+  deferredItems: string[];
 }
 
 const DEFAULT_VOCABULARY = {
@@ -247,7 +249,7 @@ export class Organiser {
 
     const items = this.itemsForRoot(root.rootId);
     let proposals = 0;
-    let deferred = 0;
+    const deferredItems: string[] = [];
     let failed = 0;
     const manifest = await provider.health();
     const manifests = manifest.ok ? [manifest.value] : [];
@@ -278,7 +280,7 @@ export class Organiser {
           continue;
         }
         if (decision.value.answers.at(-1)?.selectedId === 'unknown') {
-          deferred += 1;
+          deferredItems.push(item.externalId);
           continue;
         }
         const planned = planPlacement(
@@ -288,7 +290,7 @@ export class Organiser {
           root.policyRevision,
         );
         if (!planned.ok) {
-          deferred += 1;
+          deferredItems.push(item.externalId);
           if (process.env.ORGANISER_DEBUG === '1') console.error('planPlacement failed', planned.detail);
           continue;
         }
@@ -298,7 +300,7 @@ export class Organiser {
         await handle?.close();
       }
     }
-    return { batchId: batch, proposals, deferred, failed, provider: provider.providerId };
+    return { batchId: batch, proposals, deferred: deferredItems.length, failed, provider: provider.providerId, deferredItems };
   }
 
   /** Routes one question per taxonomy level through the provider. */
