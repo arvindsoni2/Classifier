@@ -1,0 +1,717 @@
+/**
+ * The organiser application service (plan Task 9): one wiring of the real
+ * domain — scoped discovery, bounded extraction, typed providers, the
+ * planner and the journalled executor — used identically by the CLI and the
+ * HTTP surface. Factories and clock are injected; nothing here opens a path
+ * the helper has not anchored.
+ */
+import { createHash } from 'node:crypto';
+import {
+  ok,
+  type Category,
+  type Decision,
+  type DecisionProvider,
+  type Evidence,
+  type Id,
+  type Item,
+  type Proposal,
+  type Result,
+  type Revision,
+  type RootConfig,
+} from '../domain/contracts.js';
+import { planPlacement, suggestFolderGroups, validateApproval } from '../domain/planner.js';
+import { patchProposal, rejectProposal } from '../domain/policy.js';
+import { validateTaxonomy, buildMatchedRequest, type Taxonomy } from '../domain/taxonomy.js';
+import { createRepositories, type Repositories } from '../adapters/persistence/repositories.js';
+import { resolveRoot } from '../adapters/filesystem/root.js';
+import { FilesystemSource } from '../adapters/filesystem/source.js';
+import { createExtractor, defaultExtractionLimits, type ExtractionLimits } from '../adapters/extraction/extract.js';
+import { RulesProvider } from '../adapters/providers/rules.js';
+import { ClefProvider } from '../adapters/providers/clef.js';
+import { LayaProvider } from '../adapters/providers/laya.js';
+import { JevProvider } from '../adapters/providers/jev.js';
+import { probeProviders, loadProviderConfig, type ProviderConfig } from '../cli/doctor.js';
+import { ApplicationService, type ActionResult, type FaultPoint, type HelperPort } from './workflow.js';
+
+export interface OrganiserOptions {
+  dbPath: string;
+  /** Configured Downloads path; when absent the XDG default resolves. */
+  rootPath?: string;
+  helperBinary?: string;
+  providerConfig?: ProviderConfig;
+  extractionLimits?: ExtractionLimits;
+  faultHook?: (point: FaultPoint, context: { actionId: string; proposalId: string }) => void;
+  stabilityWindowMs?: number;
+}
+
+export interface ScanResult {
+  batchId: Id;
+  rootId: Id;
+  candidates: number;
+  deferred: number;
+  directories: number;
+}
+
+export interface ClassifyResult {
+  batchId: Id;
+  proposals: number;
+  deferred: number;
+  failed: number;
+  provider: string;
+}
+
+const DEFAULT_VOCABULARY = {
+  maxLabelLength: 40,
+  labelPattern: '^[A-Za-z][A-Za-z0-9 -]*$',
+  reservedNames: ['System', 'Downloads', 'tmp'],
+};
+
+/** Crude singularisation so 'Invoices' matches 'invoice' in basenames. */
+function singular(word: string): string {
+  return word.endsWith('s') && word.length > 3 ? word.slice(0, -1) : word;
+}
+
+/** Builds the default provider set: rules (deterministic) + the typed
+ * cloud/local adapters at their configured state (blocked honestly). */
+export function createProviders(config: ProviderConfig = {}, helperBinary?: string): DecisionProvider[] {
+  const providers: DecisionProvider[] = [new RulesProvider()];
+  if (config.clef?.endpoint !== undefined) {
+    providers.push(new ClefProvider({ endpoint: config.clef.endpoint }));
+  }
+  if (config.laya !== undefined) {
+    providers.push(new LayaProvider(config.laya));
+  }
+  if (config.jev?.consentReference !== undefined && config.jev.endpoint !== undefined) {
+    providers.push(new JevProvider(config.jev));
+  }
+  void helperBinary;
+  return providers;
+}
+
+export class Organiser {
+  private readonly repositories: Repositories;
+  private readonly source: FilesystemSource;
+  private readonly providers: DecisionProvider[];
+  private readonly extractionLimits: ExtractionLimits;
+  private readonly helper: HelperPort;
+  private readonly stabilityWindowMs: number;
+  private readonly clock: () => Date;
+  private readonly destinations = new Map<Id, { id: Id; segments: string[]; device: string; inode: string; status: 'observed' | 'approved' }>();
+  private readonly taxonomy: Taxonomy;
+  private readonly configuredRootPath: string | undefined;
+  private root: RootConfig | null = null;
+  readonly service: ApplicationService;
+
+  constructor(options: OrganiserOptions) {
+    this.repositories = createRepositories(options.dbPath);
+    this.stabilityWindowMs = options.stabilityWindowMs ?? 5_000;
+    this.clock = () => new Date();
+    this.extractionLimits = options.extractionLimits ?? defaultExtractionLimits();
+    this.source = new FilesystemSource({
+      clock: {
+        now: () => this.clock().getTime(),
+        sleep: (ms: number) =>
+          new Promise((resolve) => {
+            const started = this.clock().getTime();
+            const wait = () => {
+              if (this.clock().getTime() - started >= ms) resolve();
+              else setTimeout(wait, 5);
+            };
+            wait();
+          }),
+      },
+    });
+    const config = options.providerConfig ?? loadProviderConfig();
+    this.providers = createProviders(config, options.helperBinary);
+    this.helper = createHelperPort(options.helperBinary);
+    const workflowDeps: import('./workflow.js').WorkflowDeps = {
+      repositories: this.repositories,
+      helper: this.helper,
+      clock: this.clock,
+      destinations: this.destinations,
+    };
+    if (options.faultHook !== undefined) workflowDeps.faultHook = options.faultHook;
+    this.service = new ApplicationService(workflowDeps);
+    // The in-memory taxonomy is rebuilt from discovered directories at scan
+    // time; start from an empty placeholder so the service has a revision.
+    this.taxonomy = {
+      revision: 1,
+      tree: [{ id: 'root', parentId: null, label: 'Inbox', description: 'Root grouping', destinationId: null, kind: 'group' }],
+      mappingHash: createHash('sha256').update('empty').digest('hex'),
+    };
+    this.configuredRootPath = options.rootPath;
+    if (options.rootPath !== undefined) {
+      // Root resolution failures must surface, never fall back silently to
+      // the real ~/Downloads during automated runs.
+      void this.ensureRoot(options.rootPath).catch(() => undefined);
+    }
+  }
+
+  /** Resolves (and caches) the root config; read-only. */
+  async ensureRoot(configuredPath?: string): Promise<RootConfig> {
+    const raw =
+      configuredPath ??
+      this.configuredRootPath ??
+      this.root?.absolutePath;
+    if (raw === undefined) {
+      throw new Error(
+        'OUT_OF_SCOPE: no root configured; pass --root <path> or set ORGANISER_ROOT (no implicit home fallback)',
+      );
+    }
+    const resolved = await resolveRoot(raw, {
+      policyRevision: this.taxonomy.revision,
+    });
+    if (!resolved.ok) throw new Error(`${resolved.code}: ${resolved.detail}`);
+    this.root = resolved.value;
+    this.repositories.roots.insert({
+      id: resolved.value.rootId,
+      canonicalPath: resolved.value.absolutePath,
+      device: resolved.value.device,
+      inode: resolved.value.inode,
+      policyRevision: resolved.value.policyRevision,
+    });
+    return resolved.value;
+  }
+
+
+  /** Re-discovers the destination catalogue and rebuilds the taxonomy. */
+  private async refreshCatalogue(): Promise<void> {
+    const root = await this.ensureRoot();
+    const directories = await this.source.discoverDirectories(root);
+    if (!directories.ok) throw new Error(`${directories.code}: ${directories.detail}`);
+    this.destinations.clear();
+    for (const destination of directories.value) {
+      this.destinations.set(destination.id, destination);
+    }
+    this.rebuildTaxonomy();
+  }
+
+  /** Read-only scan: discovery + directory catalogue + item persistence. */
+  async scan(configuredPath?: string): Promise<ScanResult> {
+    const root = await this.ensureRoot(configuredPath);
+    const directories = await this.source.discoverDirectories(root);
+    if (!directories.ok) throw new Error(`${directories.code}: ${directories.detail}`);
+    this.destinations.clear();
+    for (const destination of directories.value) {
+      this.destinations.set(destination.id, destination);
+    }
+
+    const batch = this.repositories.batches.create(root.rootId);
+    let candidates = 0;
+    let deferred = 0;
+    for await (const result of this.source.discover(root)) {
+      if (result.ok) {
+        candidates += 1;
+        this.repositories.items.save(result.value, root.rootId);
+      } else {
+        deferred += 1;
+      }
+    }
+    this.rebuildTaxonomy();
+    return { batchId: batch.id, rootId: root.rootId, candidates, deferred, directories: directories.value.length };
+  }
+
+  /** Rebuilds the in-memory taxonomy from the discovery catalogue. */
+  private rebuildTaxonomy(): void {
+    const tree = [...this.taxonomy.tree];
+    for (const destination of this.destinations.values()) {
+      const id = `cat-${destination.id}`;
+      if (tree.some((category) => category.id === id)) continue;
+      tree.push({
+        id,
+        parentId: 'root',
+        label: destination.segments[destination.segments.length - 1] ?? destination.id,
+        description: `${destination.segments.at(-1) ?? ''} ${singular(destination.segments.at(-1) ?? '')} documents`,
+        destinationId: destination.id,
+        kind: 'existing',
+      });
+    }
+    const destinations = [...this.destinations.values()];
+    const validated = validateTaxonomy(tree, destinations);
+    if (validated.ok) {
+      this.taxonomy.tree = validated.value.tree;
+      this.taxonomy.mappingHash = validated.value.mappingHash;
+    }
+  }
+
+  /** Extraction + typed decisions + planning for every scanned item. */
+  async classify(batchId?: Id, providerId: 'rules' | 'clef' | 'laya' | 'jev' = 'rules', profile: 'metadata' | 'compact_text' = 'compact_text'): Promise<ClassifyResult> {
+    const root = await this.ensureRoot();
+    // The destination catalogue and taxonomy are rebuilt from read-only
+    // discovery so every verb starts from the same catalogue.
+    await this.refreshCatalogue();
+    const batch = batchId ?? this.repositories.batches.listByRoot(root.rootId).at(-1)?.id;
+    if (batch === undefined) throw new Error('no batch to classify; run scan first');
+    const provider = this.providers.find((entry) => entry.providerId === providerId);
+    if (provider === undefined) throw new Error(`provider ${providerId} is not configured`);
+
+    const items = this.itemsForRoot(root.rootId);
+    let proposals = 0;
+    let deferred = 0;
+    let failed = 0;
+    const manifest = await provider.health();
+    const manifests = manifest.ok ? [manifest.value] : [];
+
+    const extractor = createExtractor();
+    for (const item of items) {
+      // Evidence: the adapter owns the opened handle, never a UI path.
+      const path = `${root.absolutePath}/${item.externalId}`;
+      const { open } = await import('node:fs/promises');
+      let handle;
+      try {
+        handle = await open(path, 'r');
+        const size = (await handle.stat({ bigint: true })).size;
+        const evidence = await extractor.extractEvidence(item, { handle, size: Number(size) }, this.extractionLimits);
+        if (!evidence.ok) {
+          failed += 1;
+          continue;
+        }
+        const evidenceValue = evidence.value;
+        if (evidenceValue.status === 'metadata_only' || evidenceValue.state.compactText === undefined) {
+          // Metadata-only evidence: try the provider anyway; it defers if
+          // it cannot place the item (FR-05).
+        }
+        const decision = await this.decideRoute(provider, evidenceValue, manifests, profile);
+        if (!decision.ok) {
+          failed += 1;
+          if (process.env.ORGANISER_DEBUG === '1') console.error('decideRoute failed', decision.detail);
+          continue;
+        }
+        if (decision.value.answers.at(-1)?.selectedId === 'unknown') {
+          deferred += 1;
+          continue;
+        }
+        const planned = planPlacement(
+          { ...item, evidenceId: evidenceValue.id },
+          { answers: decision.value.answers.map((answer) => ({ nodeId: 'root', questionId: answer.questionId, selectedId: answer.selectedId })) },
+          this.taxonomy,
+          root.policyRevision,
+        );
+        if (!planned.ok) {
+          deferred += 1;
+          if (process.env.ORGANISER_DEBUG === '1') console.error('planPlacement failed', planned.detail);
+          continue;
+        }
+        this.repositories.proposals.save({ ...planned.value, decisionIds: [decision.value.id] });
+        proposals += 1;
+      } finally {
+        await handle?.close();
+      }
+    }
+    return { batchId: batch, proposals, deferred, failed, provider: provider.providerId };
+  }
+
+  /** Routes one question per taxonomy level through the provider. */
+  private async decideRoute(
+    provider: DecisionProvider,
+    evidenceValue: Evidence,
+    manifests: Parameters<typeof buildMatchedRequest>[2],
+    profile: 'metadata' | 'compact_text',
+  ): Promise<Result<Decision>> {
+    let nodeId: Id = 'root';
+    const answers: Decision['answers'] = [];
+    for (let level = 0; level < 4; level++) {
+      const children = this.taxonomy.tree.filter((category) => category.parentId === nodeId);
+      const node = this.taxonomy.tree.find((category) => category.id === nodeId);
+      if (children.length === 0 || node === undefined) break;
+      const request = buildMatchedRequest(
+        this.treatEvidence(evidenceValue, profile),
+        { category: node, children },
+        manifests,
+      );
+      if (!request.ok) return request;
+      const result = await provider.decide(request.value);
+      if (!result.ok) return result;
+      const answer = result.value.answers[0];
+      if (answer === undefined) {
+        return { ok: false, code: 'INVALID_DECISION', detail: 'provider returned no answer' };
+      }
+      answers.push(answer);
+      if (answer.selectedId === 'unknown') break;
+      nodeId = answer.selectedId;
+      const child = this.taxonomy.tree.find((category) => category.id === nodeId);
+      if (child?.kind === 'existing') break;
+    }
+    const first = answers[0];
+    if (first === undefined) {
+      return { ok: false, code: 'INVALID_DECISION', detail: 'no routing answers' };
+    }
+    return ok({
+      id: `decision-${first.questionId}-${answers.length}`,
+      itemId: evidenceValue.itemId,
+      provider: provider.providerId,
+      modelRevision: 'route',
+      runtimeRevision: process.version,
+      evidenceHash: evidenceValue.stateHash,
+      schemaHash: 'route',
+      answers,
+      elapsedMs: 0,
+      tokenCounts: {},
+      error: null,
+    });
+  }
+
+  private treatEvidence(evidence: Parameters<DecisionProvider['decide']>[0]['evidence'], profile: 'metadata' | 'compact_text') {
+    if (profile === 'compact_text') return evidence;
+    const state: Record<string, unknown> = { ...evidence.state };
+    delete state.compactText;
+    return {
+      ...evidence,
+      profile: 'metadata' as const,
+      state,
+      stateHash: createHash('sha256').update(JSON.stringify(state)).digest('hex'),
+    };
+  }
+
+  private itemsForRoot(rootId: Id): Item[] {
+    return this.repositories.items
+      .listByRoot(rootId)
+      .map((entry) => ({ ...entry.item, sourceKind: 'filesystem' as const }));
+  }
+
+  private itemsForBatch(batch: Id): Item[] {
+    const items: Item[] = [];
+    const batchRow = this.repositories.batches.get(batch);
+    if (batchRow === null) return [];
+    for (const approval of this.repositories.approvals.listByBatch(batch)) {
+      for (const action of this.repositories.actions.listByApproval(approval.id)) {
+        const proposal = this.repositories.proposals.get(action.proposalId);
+        if (proposal !== null) {
+          const existing = items.find((item) => item.id === proposal.itemId);
+          if (existing === undefined) {
+            items.push({
+              id: proposal.itemId,
+              sourceId: batchRow.rootId,
+              sourceKind: 'filesystem',
+              externalId: proposal.basename,
+              displayName: proposal.basename,
+              revision: '1',
+              snapshot: proposal.expected,
+              evidenceId: null,
+            });
+          }
+        }
+      }
+    }
+    return items;
+  }
+
+  async listProposals(batchId?: Id): Promise<Result<Proposal[]>> {
+    if (batchId !== undefined) {
+      const batch = this.repositories.batches.get(batchId);
+      if (batch === null) {
+        return { ok: false, code: 'OUT_OF_SCOPE', detail: `unknown batch ${batchId}` };
+      }
+      return ok(this.repositories.proposals.listByRoot(batch.rootId));
+    }
+    await this.ensureRoot();
+    const batch = this.currentBatch();
+    if (batch === null) {
+      return { ok: false, code: 'OUT_OF_SCOPE', detail: 'no batch available; run scan first' };
+    }
+    return ok(this.repositories.proposals.listByRoot(batch.rootId));
+  }
+
+  patchProposal(proposalId: Id, patch: { expectedVersion: Revision; categoryId?: Id; destinationId?: Id; reject?: boolean }): Promise<Result<Proposal>> {
+    const proposal = this.repositories.proposals.get(proposalId);
+    if (proposal === null) return Promise.resolve({ ok: false as const, code: 'OUT_OF_SCOPE' as const, detail: `unknown proposal ${proposalId}` });
+    if (patch.reject === true) return Promise.resolve(rejectProposal(proposal, patch.expectedVersion));
+    const patchInput: { expectedVersion: Revision; categoryId?: Id; destinationId?: Id } = {
+      expectedVersion: patch.expectedVersion,
+    };
+    if (patch.categoryId !== undefined) patchInput.categoryId = patch.categoryId;
+    if (patch.destinationId !== undefined) patchInput.destinationId = patch.destinationId;
+    const updated = patchProposal(proposal, patchInput);
+    if (updated.ok) this.repositories.proposals.save(updated.value);
+    return Promise.resolve(updated);
+  }
+
+  async approveAll(batchId?: Id): Promise<Result<{ approvalId: string; actionSetHash: string; actions: { proposalId: Id; version: Revision }[] }>> {
+    await this.refreshCatalogue();
+    const batch = this.currentBatch(batchId);
+    if (batch === null) return { ok: false, code: 'OUT_OF_SCOPE', detail: 'no batch' };
+    const pending = [...this.destinations.keys()].length > 0 ? await this.pendingProposals(batch.id) : [];
+    if (pending.length === 0) {
+      return { ok: false, code: 'INVALID_DECISION', detail: 'there are no pending proposals to approve' };
+    }
+    const created = this.service.createApproval(batch.id, pending, 'apply', this.clock());
+    if (!created.ok) return created;
+    return ok({ approvalId: created.value.id, actionSetHash: created.value.actionSetHash, actions: pending });
+  }
+
+  private async pendingProposals(batchId: Id): Promise<{ proposalId: Id; version: Revision }[]> {
+    const listed = await this.listProposals(batchId);
+    const rows = listed.ok ? listed.value : [];
+    return rows
+      .filter((proposal) => proposal.state === 'pending')
+      .map((proposal) => ({ proposalId: proposal.id, version: proposal.version }));
+  }
+
+  private currentBatch(batchId?: Id) {
+    if (batchId !== undefined) return this.repositories.batches.get(batchId);
+    const root = this.root;
+    if (root === null) return null;
+    return this.repositories.batches.listByRoot(root.rootId).at(-1) ?? null;
+  }
+
+  async apply(approvalId: Id, actionSetHash: string): Promise<{ batchId: Id; results: ActionResult[] }> {
+    const batch = this.repositories.approvals.get(approvalId);
+    if (batch === null) throw new Error(`unknown approval ${approvalId}`);
+    // The destination catalogue is re-verified read-only before any move.
+    await this.refreshCatalogue();
+    return this.service.applyBatch(batch.batchId, approvalId, actionSetHash);
+  }
+
+  async resume(batchId?: Id): Promise<{ batchId: Id; results: ActionResult[] }> {
+    await this.refreshCatalogue();
+    const batch = this.currentBatch(batchId);
+    if (batch === null) throw new Error('no batch');
+    return this.service.resumeBatch(batch.id);
+  }
+
+  async undoAll(_applyApprovalId?: Id): Promise<{ results: ActionResult[] }> {
+    await this.refreshCatalogue();
+    const undone: ActionResult[] = [];
+    const approvals = this.repositories.approvals.listByBatch(this.currentBatch()?.id ?? '');
+    for (const approval of approvals) {
+      if (approval.mode !== 'apply') continue;
+      for (const record of this.repositories.actions.listByApproval(approval.id)) {
+        if (record.state !== 'applied') continue;
+        const undoApproval = this.service.createApproval(
+          approval.batchId,
+          [{ proposalId: record.proposalId, version: record.proposalVersion }],
+          'undo',
+          this.clock(),
+        );
+        if (!undoApproval.ok) continue;
+        const result = await this.service.undoAction(record.id, undoApproval.value.id);
+        undone.push(
+          result.ok
+            ? { actionId: record.id, proposalId: record.proposalId, outcome: 'undone', receipt: result.value, detail: 'undone' }
+            : { actionId: record.id, proposalId: record.proposalId, outcome: 'conflict', detail: `${result.code}: ${result.detail}` },
+        );
+      }
+    }
+    return { results: undone };
+  }
+
+  /** HTTP surface: create (scan) a batch for a known root id. */
+  async createBatch(rootId?: Id): Promise<Result<ScanResult>> {
+    let configuredPath: string | undefined;
+    if (rootId !== undefined && rootId !== '') {
+      const record = this.repositories.roots.get(rootId);
+      if (record === null) {
+        return { ok: false, code: 'OUT_OF_SCOPE', detail: `unknown root ${rootId}` };
+      }
+      configuredPath = record.canonicalPath;
+    }
+    const result = await this.scan(configuredPath);
+    return ok(result);
+  }
+
+  /** HTTP surface: batch lookup. */
+  getBatch(batchId: Id): Promise<Result<unknown>> {
+    const batch = this.repositories.batches.get(batchId);
+    if (batch === null) {
+      return Promise.resolve({ ok: false as const, code: 'OUT_OF_SCOPE' as const, detail: `unknown batch ${batchId}` });
+    }
+    return Promise.resolve(ok(batch));
+  }
+
+  /** HTTP surface: approval creation with the caller's action selection. */
+  createApproval(body: { batchId: Id; actions: { proposalId: Id; version: Revision }[]; mode: 'apply' | 'undo' }): Promise<Result<unknown>> {
+    return Promise.resolve(this.createApprovalSync(body));
+  }
+
+  private createApprovalSync(body: { batchId: Id; actions: { proposalId: Id; version: Revision }[]; mode: 'apply' | 'undo' }): Result<unknown> {
+    const { batchId, actions, mode } = body;
+    const batch = this.repositories.batches.get(batchId);
+    if (batch === null) return { ok: false, code: 'OUT_OF_SCOPE', detail: `unknown batch ${batchId}` };
+    const selected: Proposal[] = [];
+    for (const action of actions) {
+      const proposal = this.repositories.proposals.get(action.proposalId);
+      if (proposal === null || proposal.version !== action.version) {
+        return { ok: false, code: 'STALE', detail: `proposal ${action.proposalId} is not at version ${action.version}` };
+      }
+      selected.push(proposal);
+    }
+    const created = this.service.createApproval(batch.id, selected.map((proposal) => ({ proposalId: proposal.id, version: proposal.version })), mode, this.clock());
+    if (!created.ok) return created;
+    return ok({
+      id: created.value.id,
+      actions,
+      actionSetHash: created.value.actionSetHash,
+      taxonomyRevision: selected[0]?.taxonomyRevision ?? this.taxonomy.revision,
+      policyRevision: selected[0]?.policyRevision ?? 1,
+      expiresAt: created.value.expiresAt,
+      mode,
+    });
+  }
+
+  /** HTTP surface: the reviewed taxonomy replacing the current revision. */
+  replaceTaxonomy(body: {
+    expectedRevision: Revision;
+    tree: Category[];
+    mappings: { categoryId: Id; destinationId: Id }[];
+  }): Promise<Result<{ revision: Revision; mappingHash: string }>> {
+    return Promise.resolve(this.replaceTaxonomySync(body));
+  }
+
+  private replaceTaxonomySync(body: {
+    expectedRevision: Revision;
+    tree: Category[];
+    mappings: { categoryId: Id; destinationId: Id }[];
+  }): Result<{ revision: Revision; mappingHash: string }> {
+    if (body.expectedRevision !== this.taxonomy.revision) {
+      return {
+        ok: false,
+        code: 'STALE',
+        detail: `expected revision ${body.expectedRevision}, current revision ${this.taxonomy.revision}`,
+      };
+    }
+    const destinations = [...this.destinations.values()];
+    const validated = validateTaxonomy(body.tree, destinations);
+    if (!validated.ok) return validated;
+    this.taxonomy.tree = validated.value.tree;
+    this.taxonomy.mappingHash = validated.value.mappingHash;
+    this.taxonomy.revision += 1;
+    return ok({ revision: this.taxonomy.revision, mappingHash: validated.value.mappingHash });
+  }
+
+  /** Provider health through the same doctor probe. */
+  async providerHealth() {
+    return probeProviders(loadProviderConfig());
+  }
+
+  /** HTTP surface: the current taxonomy with its expected revision. */
+  getTaxonomy(): Result<{ revision: Revision; tree: Category[]; mappingHash: string }> {
+    return ok({ revision: this.taxonomy.revision, tree: this.taxonomy.tree, mappingHash: this.taxonomy.mappingHash });
+  }
+
+  /** HTTP surface: classification for a batch (provider + profile). */
+  classifyBatch(batchId: Id, body: { provider: string; profile: string }): Promise<Result<ClassifyResult>> {
+    return this.classify(
+      batchId,
+      body.provider as 'rules' | 'clef' | 'laya' | 'jev',
+      body.profile === 'metadata' ? 'metadata' : 'compact_text',
+    ).then(ok);
+  }
+
+  /** HTTP surface: apply with the exact approval and action-set hash. */
+  applyBatch(batchId: Id, body: { approvalId: Id; actionSetHash: string }): Promise<Result<unknown>> {
+    void batchId;
+    return this.apply(body.approvalId, body.actionSetHash).then(ok);
+  }
+
+  /** HTTP surface: reconcile a batch's unfinished work. */
+  resumeBatch(batchId: Id): Promise<Result<unknown>> {
+    return this.resume(batchId).then(ok);
+  }
+
+  /** HTTP surface: conditional undo under a separate undo approval. */
+  async undoAction(actionId: Id, body: { approvalId: Id }): Promise<Result<unknown>> {
+    const result = await this.service.undoAction(actionId, body.approvalId);
+    return result;
+  }
+
+  /** HTTP surface: create one reviewed folder segment (FR-06). */
+  mkdirFolder(batchId: Id, body: { parentSegments: string[]; segment: string; label: string }): Promise<Result<unknown>> {
+    return this.ensureRoot().then((root) =>
+      this.service.mkdirAt(root, body.parentSegments, body.segment, batchId, body.label),
+    );
+  }
+
+  /** HTTP surface: reviewed folder groups. */
+  listFolders(batchId: Id): Result<unknown> {
+    return ok(this.service.listFolderCandidates(batchId));
+  }
+
+  /** HTTP surface: the batch's action journal for the history surface. */
+  listActions(batchId: Id): Result<unknown> {
+    const rows: unknown[] = [];
+    const seen = new Set<string>();
+    for (const approval of this.repositories.approvals.listByBatch(batchId)) {
+      for (const record of this.repositories.actions.listByApproval(approval.id)) {
+        if (seen.has(record.id)) continue;
+        seen.add(record.id);
+        rows.push({
+          actionId: record.id,
+          proposalId: record.proposalId,
+          state: record.state,
+          mode: record.mode,
+          events: record.events.length > 0 ? record.events : this.repositories.actions.get(record.id)?.events ?? [],
+        });
+      }
+    }
+    return ok({ actions: rows });
+  }
+
+  /** Suggests reviewed folder groups from deferred items (FR-06). */
+  folderGroups(batchId?: Id) {
+    const batch = this.currentBatch(batchId);
+    if (batch === null) return [];
+    const items = this.itemsForRoot(batch.rootId);
+    return suggestFolderGroups(items, [], DEFAULT_VOCABULARY);
+  }
+
+  validateApprovalFor(approvalId: Id): boolean {
+    const approval = this.repositories.approvals.get(approvalId);
+    if (approval === null) return false;
+    const selected = JSON.parse(approval.selectedActionsJson) as { proposalId: Id; version: Revision }[];
+    const context = {
+      taxonomyRevision: approval.taxonomyRevision,
+      policyRevision: approval.policyRevision,
+      actions: selected.map((entry) => {
+        const proposal = this.repositories.proposals.get(entry.proposalId);
+        return { proposalId: entry.proposalId, version: proposal?.version ?? -1 };
+      }),
+    };
+    const approvalContract = {
+      id: approval.id,
+      batchId: approval.batchId,
+      actions: selected,
+      actionSetHash: approval.actionSetHash,
+      taxonomyRevision: approval.taxonomyRevision,
+      policyRevision: approval.policyRevision,
+      approvedAt: '',
+      expiresAt: approval.expiresAt,
+      mode: approval.mode as 'apply' | 'undo',
+    };
+    return validateApproval(approvalContract, context, this.clock()).ok;
+  }
+
+  close(): void {
+    this.repositories.close();
+  }
+}
+
+/** Real helper bridge as a HelperPort (lazy import keeps the module testable). */
+function createHelperPort(binaryPath?: string): HelperPort {
+  let cached: typeof import('../adapters/filesystem/helper.js') | null = null;
+  const load = async () => {
+    if (cached === null) cached = await import('../adapters/filesystem/helper.js');
+    return cached;
+  };
+  return {
+    async probe(root) {
+      const { probeFilesystem } = await load();
+      return probeFilesystem(root, binaryPath);
+    },
+    async inspectAt(root, segments) {
+      const { inspectAt } = await load();
+      return inspectAt(root, segments, binaryPath);
+    },
+    async moveAt(action, root, destination) {
+      const { moveAt } = await load();
+      return moveAt(action, root, destination, binaryPath);
+    },
+    async mkdirAt(root, parent, segment) {
+      const { mkdirAt } = await load();
+      return mkdirAt(root, parent, segment, binaryPath);
+    },
+    async undoAt(action, root) {
+      const { undoAt } = await load();
+      return undoAt(action, root, binaryPath);
+    },
+  };
+}

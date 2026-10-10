@@ -88,14 +88,21 @@ export interface ActionSaveInput {
 
 export interface Repositories {
   roots: { insert(root: RootRecord): void; get(id: Id): RootRecord | null };
-  items: { save(item: Item, rootId: Id): void };
+  items: {
+    save(item: Item, rootId: Id): void;
+    listByRoot(rootId: Id): { item: Item; rootId: Id }[];
+  };
   batches: {
     create(rootId: Id): Batch;
     get(id: Id): Batch | null;
     requestCancel(id: Id): void;
     listByRoot(rootId: Id): Batch[];
   };
-  proposals: { save(proposal: Proposal): void; get(id: Id): Proposal | null };
+  proposals: {
+    save(proposal: Proposal): void;
+    get(id: Id): Proposal | null;
+    listByRoot(rootId: Id): Proposal[];
+  };
   approvals: {
     insert(approval: ApprovalRecord): void;
     get(id: Id): ApprovalRecord | null;
@@ -162,9 +169,33 @@ interface ActionRow {
   receipt_json: string | null;
 }
 
+interface ItemRow {
+  id: string;
+  root_id: string;
+  external_id: string;
+  revision: string;
+  snapshot_json: string | null;
+}
+
 interface EventRow {
   event: string;
   recorded_at: string;
+}
+
+function mapProposalRow(row: ProposalRow): Proposal {
+  return {
+    id: row.id,
+    version: row.version,
+    itemId: row.item_id,
+    categoryId: row.category_id,
+    destinationId: row.destination_id ?? '',
+    basename: row.basename,
+    expected: JSON.parse(row.expected_snapshot_json) as Snapshot,
+    taxonomyRevision: row.taxonomy_revision,
+    policyRevision: row.policy_revision,
+    decisionIds: JSON.parse(row.decision_ids_json) as Id[],
+    state: row.state as Proposal['state'],
+  };
 }
 
 export function createRepositories(dbPath: string): Repositories {
@@ -227,6 +258,13 @@ export function createRepositories(dbPath: string): Repositories {
        state = excluded.state`,
   );
   const getProposal = db.prepare('SELECT * FROM proposals WHERE id = ?');
+  const listProposalsByRoot = db.prepare(
+    `SELECT p.* FROM proposals p JOIN items i ON i.id = p.item_id
+     WHERE i.root_id = ? ORDER BY p.rowid`,
+  );
+  const listItemsByRoot = db.prepare(
+    'SELECT * FROM items WHERE root_id = ? ORDER BY rowid',
+  );
   const insertApproval = db.prepare(
     `INSERT INTO approvals (id, batch_id, action_set_hash, taxonomy_revision, policy_revision,
        selected_actions_json, expires_at, mode)
@@ -301,6 +339,22 @@ export function createRepositories(dbPath: string): Repositories {
           item.snapshot === null ? null : JSON.stringify(item.snapshot),
         );
       },
+      listByRoot(rootId) {
+        const rows = listItemsByRoot.all(rootId) as ItemRow[];
+        return rows.map((row) => ({
+          rootId: row.root_id,
+          item: {
+            id: row.id,
+            sourceId: row.root_id,
+            sourceKind: 'filesystem' as const,
+            externalId: row.external_id,
+            displayName: row.external_id,
+            revision: row.revision,
+            snapshot: row.snapshot_json === null ? null : (JSON.parse(row.snapshot_json) as Snapshot),
+            evidenceId: null,
+          },
+        }));
+      },
     },
     batches: {
       create(rootId) {
@@ -366,19 +420,11 @@ export function createRepositories(dbPath: string): Repositories {
       get(id) {
         const row = getProposal.get(id) as ProposalRow | undefined;
         if (row === undefined) return null;
-        return {
-          id: row.id,
-          version: row.version,
-          itemId: row.item_id,
-          categoryId: row.category_id,
-          destinationId: row.destination_id ?? '',
-          basename: row.basename,
-          expected: JSON.parse(row.expected_snapshot_json) as Snapshot,
-          taxonomyRevision: row.taxonomy_revision,
-          policyRevision: row.policy_revision,
-          decisionIds: JSON.parse(row.decision_ids_json) as Id[],
-          state: row.state as Proposal['state'],
-        };
+        return mapProposalRow(row);
+      },
+      listByRoot(rootId) {
+        const rows = listProposalsByRoot.all(rootId) as ProposalRow[];
+        return rows.map(mapProposalRow);
       },
     },
     approvals: {

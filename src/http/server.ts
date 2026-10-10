@@ -5,6 +5,7 @@
  * module is wiring only.
  */
 import Fastify, { type FastifyInstance, type FastifyListenOptions } from 'fastify';
+import { existsSync } from 'node:fs';
 import { createSessionStore, type SessionConfig } from './session.js';
 import { registerRoutes, type ApplicationService } from './routes.js';
 
@@ -54,4 +55,28 @@ export function buildServer(
   }) as FastifyInstance['listen'];
 
   return app;
+}
+
+/**
+ * Test/CLI factory: builds the server around a concrete Organiser on the
+ * given database and root, optionally serving a prebuilt UI from `uiDist`.
+ */
+export async function createServerForE2E(options: {
+  dbPath: string;
+  rootPath: string;
+  port?: number;
+  uiDist?: string;
+}): Promise<OrganiserServer> {
+  const { Organiser } = await import('../application/organiser.js');
+  const organiser = new Organiser({ dbPath: options.dbPath, rootPath: options.rootPath });
+  const server = buildServer(organiser, {
+    port: options.port ?? 0,
+    host: '127.0.0.1',
+  });
+  const uiDist = options.uiDist;
+  if (uiDist !== undefined && existsSync(uiDist)) {
+    const { default: fastifyStatic } = await import('@fastify/static');
+    await server.register(fastifyStatic, { root: uiDist, prefix: '/app/' });
+  }
+  return server;
 }

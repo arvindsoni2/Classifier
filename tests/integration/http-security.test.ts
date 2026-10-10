@@ -190,7 +190,7 @@ describe('cross_site_mutations_are_rejected', () => {
     expect(okRead.statusCode).toBe(200);
   });
 
-  it('blocks apply/resume/undo until the verified executor is installed', async () => {
+  it('blocks apply/resume/undo when the service has no execution surface', async () => {
     const service = new FakeService();
     const server = await startServer(service);
     servers.push(server);
@@ -206,10 +206,10 @@ describe('cross_site_mutations_are_rejected', () => {
           cookie: server.cookie,
         },
       });
-      expect(response.statusCode).toBe(503);
+      expect(response.statusCode).toBe(501);
       const body = response.json() as { error: { code: string; detail: string } };
       expect(body.error.code).toBe('UNSUPPORTED');
-      expect(body.error.detail).toMatch(/executor/i);
+      expect(body.error.detail).toMatch(/not wired/i);
     }
     // No application-service mutation was reachable behind the block.
     expect(service.calls).toHaveLength(0);

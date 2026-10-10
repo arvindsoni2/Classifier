@@ -21,7 +21,7 @@ export interface ApplicationService {
     tree: Category[];
     mappings: { categoryId: Id; destinationId: Id }[];
   }): Promise<Result<{ revision: Revision; mappingHash: Sha256 }>>;
-  listProposals(batchId: Id): Promise<Result<unknown>>;
+  listProposals(batchId: Id): Promise<Result<unknown>> | Result<unknown>;
   patchProposal(
     proposalId: Id,
     body: { expectedVersion: Revision; categoryId?: Id; destinationId?: Id; reject?: boolean },
@@ -32,6 +32,16 @@ export interface ApplicationService {
     mode: 'apply' | 'undo';
   }): Promise<Result<unknown>>;
   providerHealth(): Promise<unknown>;
+
+  // Optional surfaces wired by the concrete application service (Task 9).
+  getTaxonomy?(): Result<{ revision: Revision; tree: Category[]; mappingHash: Sha256 }>;
+  classifyBatch?(batchId: Id, body: { provider: string; profile: string }): Promise<Result<unknown>>;
+  applyBatch?(batchId: Id, body: { approvalId: Id; actionSetHash: Sha256 }): Promise<Result<unknown>>;
+  resumeBatch?(batchId: Id): Promise<Result<unknown>>;
+  undoAction?(actionId: Id, body: { approvalId: Id }): Promise<Result<unknown>>;
+  mkdirFolder?(batchId: Id, body: { parentSegments: string[]; segment: string; label: string }): Promise<Result<unknown>>;
+  listFolders?(batchId: Id): Result<unknown>;
+  listActions?(batchId: Id): Result<unknown>;
 }
 
 type Result<T> = { ok: true; value: T } | { ok: false; code: string; detail: string };
@@ -250,20 +260,108 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     return reply.send({ approval: result.value });
   });
 
-  // Mutation endpoints are BLOCKED until the verified executor and
-  // journalled apply are wired into the review workflow (plan Task 9).
-  // Classifier success never authorises a filesystem move.
-  for (const path of [
-    '/api/batches/:id/apply',
-    '/api/batches/:id/resume',
-    '/api/actions/:id/undo',
-  ]) {
-    app.post(path, async (_request, reply) =>
-      sendError(
-        reply,
-        503,
-        'UNSUPPORTED',
-        'filesystem execution is not wired into the review workflow yet: the anchored helper and journalled executor are verified (Tasks 7-8), the application service wiring lands in Task 9; classifier output cannot authorise moves',
-      ));
-  }
+  app.get('/api/taxonomy', async (_request, reply) => {
+    if (service.getTaxonomy === undefined) {
+      return sendError(reply, 501, 'UNSUPPORTED', 'the taxonomy surface is not wired into this service');
+    }
+    const result = service.getTaxonomy();
+    if (!result.ok) return sendError(reply, statusForError(result.code), result.code, result.detail);
+    return reply.send(result.value);
+  });
+
+  app.post('/api/batches/:id/classify', async (request, reply) => {
+    if (service.classifyBatch === undefined) {
+      return sendError(reply, 501, 'UNSUPPORTED', 'classification is not wired into this service');
+    }
+    const { id } = request.params as { id: string };
+    const body = request.body as { provider?: unknown; profile?: unknown };
+    if (body?.provider !== undefined && typeof body.provider !== 'string') {
+      return sendError(reply, 400, 'INVALID_DECISION', 'provider must be a string');
+    }
+    const result = await service.classifyBatch(id, {
+      provider: typeof body?.provider === 'string' ? body.provider : 'rules',
+      profile: typeof body?.profile === 'string' && body.profile === 'metadata' ? 'metadata' : 'compact_text',
+    });
+    if (!result.ok) return sendError(reply, statusForError(result.code), result.code, result.detail);
+    return reply.code(202).send(result.value);
+  });
+
+  // Mutation endpoints require the exact approval and hash; the journalled
+  // executor (Task 8) performs them. Classifier success never authorises
+  // a filesystem move: only an explicit, current approval does.
+  app.post('/api/batches/:id/apply', async (request, reply) => {
+    if (service.applyBatch === undefined) {
+      return sendError(reply, 501, 'UNSUPPORTED', 'apply is not wired into this service');
+    }
+    const { id } = request.params as { id: string };
+    const body = request.body as { approvalId?: unknown; actionSetHash?: unknown };
+    if (typeof body?.approvalId !== 'string' || typeof body?.actionSetHash !== 'string') {
+      return sendError(reply, 400, 'INVALID_DECISION', 'approvalId and actionSetHash are required');
+    }
+    const result = await service.applyBatch(id, { approvalId: body.approvalId, actionSetHash: body.actionSetHash });
+    if (!result.ok) return sendError(reply, statusForError(result.code), result.code, result.detail);
+    return reply.send(result.value);
+  });
+
+  app.post('/api/batches/:id/resume', async (request, reply) => {
+    if (service.resumeBatch === undefined) {
+      return sendError(reply, 501, 'UNSUPPORTED', 'resume is not wired into this service');
+    }
+    const { id } = request.params as { id: string };
+    const result = await service.resumeBatch(id);
+    if (!result.ok) return sendError(reply, statusForError(result.code), result.code, result.detail);
+    return reply.send(result.value);
+  });
+
+  app.post('/api/actions/:id/undo', async (request, reply) => {
+    if (service.undoAction === undefined) {
+      return sendError(reply, 501, 'UNSUPPORTED', 'undo is not wired into this service');
+    }
+    const { id } = request.params as { id: string };
+    const body = request.body as { approvalId?: unknown };
+    if (typeof body?.approvalId !== 'string') {
+      return sendError(reply, 400, 'INVALID_DECISION', 'approvalId is required for an undo');
+    }
+    const result = await service.undoAction(id, { approvalId: body.approvalId });
+    if (!result.ok) return sendError(reply, statusForError(result.code), result.code, result.detail);
+    return reply.send(result.value);
+  });
+
+  app.post('/api/batches/:id/folders', async (request, reply) => {
+    if (service.mkdirFolder === undefined) {
+      return sendError(reply, 501, 'UNSUPPORTED', 'folder creation is not wired into this service');
+    }
+    const { id } = request.params as { id: string };
+    const body = request.body as { parentSegments?: unknown; segment?: unknown; label?: unknown };
+    if (!Array.isArray(body?.parentSegments) || typeof body?.segment !== 'string' || typeof body?.label !== 'string') {
+      return sendError(reply, 400, 'INVALID_DECISION', 'parentSegments, segment and label are required');
+    }
+    const result = await service.mkdirFolder(id, {
+      parentSegments: body.parentSegments as string[],
+      segment: body.segment,
+      label: body.label,
+    });
+    if (!result.ok) return sendError(reply, statusForError(result.code), result.code, result.detail);
+    return reply.send(result.value);
+  });
+
+  app.get('/api/batches/:id/folders', async (request, reply) => {
+    if (service.listFolders === undefined) {
+      return sendError(reply, 501, 'UNSUPPORTED', 'folder listing is not wired into this service');
+    }
+    const { id } = request.params as { id: string };
+    const result = service.listFolders(id);
+    if (!result.ok) return sendError(reply, statusForError(result.code), result.code, result.detail);
+    return reply.send(result.value);
+  });
+
+  app.get('/api/batches/:id/history', async (request, reply) => {
+    if (service.listActions === undefined) {
+      return sendError(reply, 501, 'UNSUPPORTED', 'history is not wired into this service');
+    }
+    const { id } = request.params as { id: string };
+    const result = service.listActions(id);
+    if (!result.ok) return sendError(reply, statusForError(result.code), result.code, result.detail);
+    return reply.send(result.value);
+  });
 }

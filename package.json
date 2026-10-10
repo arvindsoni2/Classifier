@@ -12,16 +12,18 @@
     "test:e2e": "node scripts/not-until-task.js e2e 9",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint .",
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && node scripts/copy-assets.js",
     "test:native": "cargo test --manifest-path native/fsops/Cargo.toml",
     "doctor": "node dist/cli/doctor.js",
     "eval:fixture": "node dist/eval/fixture.js"
   },
   "dependencies": {
+    "@fastify/static": "^9.3.0",
     "better-sqlite3": "^12.2.0",
     "fastify": "^5.12.5"
   },
   "devDependencies": {
+    "@playwright/test": "^1.64.0",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.16.0",
     "eslint": "^9.30.0",

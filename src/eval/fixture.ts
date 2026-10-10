@@ -17,11 +17,7 @@ function unwrap<T>(result: Result<T>): T {
   return result.value;
 }
 
-async function main(): Promise<void> {
-  const args = process.argv.slice(2);
-  const fixtureDir = args[0] ?? 'tests/fixtures/eval';
-  const outDir = args[1] ?? 'build/eval-fixture';
-
+async function main(fixtureDir: string, outDir: string): Promise<void> {
   const dataset: EvalDataset = unwrap(loadDataset(fixtureDir));
   const labels = unwrap(loadLabels(fixtureDir));
 
@@ -83,7 +79,13 @@ async function main(): Promise<void> {
   );
 }
 
+export async function runFixtureCli(argv: readonly string[] = process.argv.slice(2)): Promise<void> {
+  const fixtureDir = argv[0] ?? 'tests/fixtures/eval';
+  const outDir = argv[1] ?? 'build/eval-fixture';
+  await main(fixtureDir, outDir);
+}
+
 const isMain = process.argv[1] !== undefined && process.argv[1].endsWith('fixture.js');
 if (isMain) {
-  await main();
+  await runFixtureCli();
 }
