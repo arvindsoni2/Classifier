@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   stableStringify,
@@ -383,12 +385,47 @@ describe('LayaProvider (blocked without a local checkpoint)', () => {
     const provider = new LayaProvider({});
     const health = await provider.health();
     expect(health.ok).toBe(false);
-    if (!health.ok) expect(health.detail).toMatch(/checkpoint|blocked|unavailable/i);
+    if (!health.ok) expect(health.detail).toMatch(/checkpoint|blocked|unavailable|modelDir/i);
 
     const decision = await provider.decide(request());
     expect(decision.ok).toBe(false);
     if (!decision.ok) expect(decision.code).toBe('PROVIDER_FAILED');
     await provider.close();
+  });
+
+  /**
+   * Real-model smoke (plan Task 4 step: "Run optional real-model smoke tests
+   * on synthetic material and record pass/blocked status separately"). Runs
+   * only when the pinned bundle directory exists on this machine; the
+   * synthetic fixture carries no ground-truth claim.
+   */
+  const LAYA_BUNDLE = '/home/asoni/.cache/receptron-laya/receptron--laya-onnx/main';
+  const layaAvailable = existsSync(join(LAYA_BUNDLE, 'laya.onnx'));
+  const describeRealModel = layaAvailable ? describe : describe.skip;
+
+  describeRealModel('LayaProvider (real local ONNX model, opt-in)', () => {
+    it('answers the canonical question through the validated contract', async () => {
+      const provider = new LayaProvider({ modelDir: LAYA_BUNDLE });
+      const health = await provider.health();
+      expect(health.ok).toBe(true);
+      if (health.ok) {
+        expect(health.value.questionTokenLimit).toBe(192);
+        expect(health.value.inputTokenLimit).toBe(512);
+      }
+
+      const canonical = request('synthetic fixture invoice for hosting text');
+      const decision = await provider.decide(canonical);
+      expect(decision.ok).toBe(true);
+      if (decision.ok) {
+        const answer = decision.value.answers[0];
+        expect(answer).toBeDefined();
+        const total = Object.values(answer?.probabilities ?? {}).reduce((a, b) => a + b, 0);
+        expect(total).toBeGreaterThan(0.99);
+        expect(decision.value.evidenceHash).toBe(canonical.evidence.stateHash);
+        expect(decision.value.schemaHash).toBe(canonical.schemaHash);
+      }
+      await provider.close();
+    }, 120_000);
   });
 });
 

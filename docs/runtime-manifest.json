@@ -28,7 +28,9 @@
     "@types/better-sqlite3": "7.6.13",
     "nativeBuildApproval": "pnpm-workspace.yaml allowBuilds (better-sqlite3, esbuild 0.28.2)",
     "@playwright/test": "1.64.0",
-    "playwright chromium": "156.0.8078.4 (chromium-headless-shell v1248)"
+    "playwright chromium": "156.0.8078.4 (chromium-headless-shell v1248)",
+    "@receptron/laya": "0.1.2",
+    "onnxruntime-node": "1.30.0"
   },
   "externalTools": {
     "pdftotext": "26.01.0"
@@ -83,8 +85,23 @@
       "detail": "in-process deterministic baseline; health probe green at build time (rules@1.0.0, runtime v22.23.2)"
     },
     "laya": {
-      "status": "blocked",
-      "detail": "No ONNX checkpoint present on this machine (receptron/laya, ~1.7 GB FP32 English checkpoint per docs/08 S1). health() reports PROVIDER_FAILED/blocked. Real-model smoke tests recorded as blocked, not substituted."
+      "status": "ok",
+      "smokeDate": "2026-10-09",
+      "smokeResult": "pass",
+      "package": "@receptron/laya 0.1.2 (onnxruntime-node 1.30.0)",
+      "modelDir": "/home/asoni/.cache/receptron-laya/receptron--laya-onnx/main",
+      "realBundleLimits": {
+        "max_len": 512,
+        "head_max_len": 192
+      },
+      "decideSmoke": {
+        "fixture": "invoice-hosting-2026-01.pdf, 4-option root question",
+        "selectedId": "cat-invoices",
+        "probability": 0.9813,
+        "confidence": 0.9202,
+        "elapsedMs": 419,
+        "note": "measured through the project provider contract; synthetic fixture only."
+      }
     },
     "clef": {
       "status": "ok",
@@ -127,7 +144,8 @@
     "Actual resolved versions, verified 2026-10-07; no placeholder claims.",
     "Automated tests use synthetic fixture roots under /tmp/opencode only; the real Downloads directory is never a test fixture (AGENTS.md rule 12).",
     "Playwright (test:e2e) and the Rust helper (test:native) are later plan tasks; their npm scripts fail loudly with 'not until Task N' in the interim.",
-    "Playwright chromium 156.0.8078.4 installed for e2e; 5/5 review-flow tests pass."
+    "Playwright chromium 156.0.8078.4 installed for e2e; 5/5 review-flow tests pass.",
+    "Laya unblocked: real ONNX bundle with laya_config.json limits 512/192; loads once and reuses the session."
   ],
   "cpp": "g++ 16.2.1 (better-sqlite3 native builds)",
   "prlimit": "/usr/bin/prlimit (extraction memory ceiling)"

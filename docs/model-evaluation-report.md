@@ -31,8 +31,9 @@ multiplied into a "global confidence".
 
 ## 3. Unmeasured (blocked or pending)
 
-- **Laya vs Clef matched-input comparison**: blocked on this machine (no Laya
-  checkpoint). Clef is live and healthy; the matched treatment needs Laya.
+- **Laya vs Clef matched-input comparison**: both providers are now live
+  (Laya ONNX bundle + local Clef SystemOne server). The matched treatment
+  still needs user-labelled data to produce accuracy numbers.
 - **Held-out user labels**: not collected. Approving labels with the user
   starts a new development cycle per docs/05.
 - **Thresholds and cascades**: not fitted; every node runs review_all by

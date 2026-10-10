@@ -14,7 +14,8 @@ import { ClefProvider, type ClefTransport } from '../adapters/providers/clef.js'
 import { JevProvider } from '../adapters/providers/jev.js';
 
 export interface ProviderConfig {
-  laya?: { modelPath?: string; packageName?: string };
+  /** Bundle directory for the pinned @receptron/laya ONNX runtime. */
+  laya?: { modelDir?: string };
   clef?: { endpoint?: string };
   jev?: { consentReference?: string; endpoint?: string };
 }

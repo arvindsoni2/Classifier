@@ -67,8 +67,12 @@ pnpm run doctor  → exit 0
 
 ## 4. Blocked or unavailable
 
-- Laya ONNX checkpoint: not installed on this machine → provider blocked;
-  no real-model results.
+- **Laya: live.** @receptron/laya 0.1.2 with the ONNX bundle at
+  ~/.cache/receptron-laya/receptron--laya-onnx/main (real limits 512/192 from
+  laya_config.json). Synthetic invoice fixture classified cat-invoices at
+  p=0.9813 in 419 ms. Both typed providers (Laya local, Clef SystemOne) now
+  answer the same question shape, which is the precondition for the matched
+  comparison.
 - Jev: no cloud consent recorded → disabled; endpoint never guessed.
 - Cross-mount as a *destination discovery* case beyond the fixture: the
   kernel-enforced EXDEV path is verified in tests; a real second mount inside
