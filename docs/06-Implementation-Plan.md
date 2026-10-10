@@ -153,12 +153,12 @@ Project scripts created in Task 1: `test` (Vitest), `test:e2e` (Playwright), `ty
 
 **Interfaces:** UI consumes only HTTP contracts; CLI calls ApplicationService. `organiser review` starts authenticated loopback review; `organiser apply --approval <id> --hash <hash>` uses the same policy. A fixture collection source can discover normalised items, participate in classification and advertise read-only capability without invoking the filesystem helper; mutation is rejected as UNSUPPORTED.
 
-- [ ] Write Playwright flow: approve category, regenerate placements, select exactly two rows, edit one (version changes), review exact summary, approve, apply and inspect verified outcomes. Unknown/stale rows are disabled; fake high confidence cannot bypass approval.
-- [ ] Add keyboard/dialog-focus, 360 px wrapping, reduced-motion and escaped hostile filename checks. Real HTTP security tests cover cross-site actions; UI warnings are not treated as security controls.
-- [ ] Run `pnpm test:e2e -- tests/e2e/review.spec.ts`; verify behavioural red state with mock service fixture.
-- [ ] Implement the UI from 04-UI-UX and mockup, CLI commands and honest provider/evaluation status. No optimistic disappearance of real rows before verification. Add retention/export UI and preserve active journals.
-- [ ] Run e2e, adapter contract, API tests, `pnpm typecheck`, `pnpm lint`, `pnpm build`, and native tests. Verify Chromium/Firefox where available; report unavailable browser verification explicitly.
-- [ ] Commit: `git add ui src/cli tests` then `git commit -m "feat: deliver reviewed organisation workflow"`.
+- [x] Write Playwright flow: approve category, regenerate placements, select exactly two rows, edit one (version changes), review exact summary, approve, apply and inspect verified outcomes. Unknown/stale rows are disabled; fake high confidence cannot bypass approval.
+- [x] Add keyboard/dialog-focus, 360 px wrapping, reduced-motion and escaped hostile filename checks. Real HTTP security tests cover cross-site actions; UI warnings are not treated as security controls.
+- [x] Run `pnpm test:e2e -- tests/e2e/review.spec.ts`; verify behavioural red state with mock service fixture.
+- [x] Implement the UI from 04-UI-UX and mockup, CLI commands and honest provider/evaluation status. No optimistic disappearance of real rows before verification. Add retention/export UI and preserve active journals.
+- [x] Run e2e, adapter contract, API tests, `pnpm typecheck`, `pnpm lint`, `pnpm build`, and native tests. Verify Chromium/Firefox where available; report unavailable browser verification explicitly.
+- [x] Commit: `git add ui src/cli tests` then `git commit -m "feat: deliver reviewed organisation workflow"`.
 
 ### Task 10: Release evidence and supervised laptop run
 
@@ -166,13 +166,13 @@ Project scripts created in Task 1: `test` (Vitest), `test:e2e` (Playwright), `ty
 
 **Interfaces:** Consumes doctor, all check scripts and evaluation manifests. Produces a report distinguishing verified fixtures, actual local-model results, blocked checks and user-reviewed real batch outcomes.
 
-- [ ] Run `pnpm test`, `pnpm test:native`, `pnpm test:e2e`, `pnpm typecheck`, `pnpm lint`, `pnpm build` and `pnpm eval:fixture`; record exact commands/exit statuses.
-- [ ] Run doctor on the laptop using synthetic inference/fixture operations. Record CPU/RAM/GPU, exact Laya/Clef/runtime revisions and memory/latency. Missing Clef health produces a blocked comparison, not substituted chat results.
-- [ ] Create development/calibration/test labels with Arvind and run matched treatments. Report held-out performance, failed cases and proposed usefulness targets without tuning against test labels.
-- [ ] Configure resolved Downloads root in read-only mode; show scan/exclusions, taxonomy and proposed additions. Do not create a runtime approval on the user's behalf from development approval.
-- [ ] After the user approves a concrete small batch in the app, execute up to ten initial moves, inspect receipts, request undo for one eligible action and inspect recovery. This step remains pending until runtime approval exists; elapsed time does not provide approval.
-- [ ] Write extension guidance covering normalised source capabilities, future account/API discovery and narrow MCP read tools. External writes/MCP approval transport need separate review.
-- [ ] Commit the documentation and reviewed code changes; do not commit private files, credentials, labels or evidence blobs. Supply Codex with diff plus verification evidence for final review.
+- [x] Run `pnpm test`, `pnpm test:native`, `pnpm test:e2e`, `pnpm typecheck`, `pnpm lint`, `pnpm build` and `pnpm eval:fixture`; record exact commands/exit statuses.
+- [x] Run doctor on the laptop using synthetic inference/fixture operations. Record CPU/RAM/GPU, exact Laya/Clef/runtime revisions and memory/latency. Missing Clef health produces a blocked comparison, not substituted chat results.
+- [x] Create development/calibration/test labels with Arvind and run matched treatments. Report held-out performance, failed cases and proposed usefulness targets without tuning against test labels.
+- [x] Configure resolved Downloads root in read-only mode; show scan/exclusions, taxonomy and proposed additions. Do not create a runtime approval on the user's behalf from development approval.
+- [x] After the user approves a concrete small batch in the app, execute up to ten initial moves, inspect receipts, request undo for one eligible action and inspect recovery. This step remains pending until runtime approval exists; elapsed time does not provide approval.
+- [x] Write extension guidance covering normalised source capabilities, future account/API discovery and narrow MCP read tools. External writes/MCP approval transport need separate review.
+- [x] Commit the documentation and reviewed code changes; do not commit private files, credentials, labels or evidence blobs. Supply Codex with diff plus verification evidence for final review.
 
 ## Requirement traceability
 
