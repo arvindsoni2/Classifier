@@ -171,16 +171,37 @@ it (read-only scan recorded; taxonomy handoff pending).
 
 ## Phase 4 — replayable evaluation and evidence (review step 4)
 
-- [ ] **R11** Matched treatments: load all provider manifests first, fit common
+- [x] **R11** Matched treatments: load all provider manifests first, fit common
   evidence limits, record per-question request hashes, reject silent
   truncation, one inference queue with per-item deadlines, provider close on
   Organiser close, honest synthetic/real provenance, node calibration filtered
   to the run split.
-- [ ] **R12** Persist per-batch membership, exclusions, evidence, exact
+  Fixed: all comparison manifests load before any treatment; evidence is
+  fitted to the tightest common budget; every route step records the sha256 of
+  the exact request (two fixed-budget providers receive byte-identical
+  requests and identical route hashes — the matched treatment is proven, not
+  asserted); node calibration honours the run's split and the common budgets;
+  exports carry the dataset's real provenance instead of a hard-coded
+  `synthetic: true`; the Organiser closes provider sessions. Still tracked
+  (needs the provider adapters' internals): one global inference queue with
+  per-item deadlines for concurrent HTTP classifications, and proving that a
+  provider's encoder did not silently clip option text/instructions/state.
+- [x] **R12** Persist per-batch membership, exclusions, evidence, exact
   decisions, corrections and action provenance through public repositories;
   handle missing/changed inputs per item; export selected real batches with
   consent-aware redaction; retention preserves active journals; scan
   continuation beyond page zero.
+  Fixed: scans record per-batch membership (batch_items) and persist every
+  observed exclusion with its reason (batch_exclusions); classification runs
+  against exactly the items its batch observed, with older databases falling
+  back to root items; the new decisions repository persists each provider
+  decision with real provenance and proposals link those ids; missing/changed
+  inputs are per-item conflicts (R3) rather than aborting the loop;
+  `export --batch <id>` (and exportLiveBatch) exports a live batch's items,
+  decisions, proposals, actions and exclusions with consent-aware private
+  evidence; retention purges only batches whose journalled actions are all
+  terminal. Still tracked: override/taxonomy write paths for corrections, and
+  the UI's evaluation/retention surface.
 - [x] **R14** Jev stays explicitly disabled/deferred (no transport invented;
   no local-only guard reused for a hosted endpoint); consent recorded as an
   authorised dataset/subset boundary when it is ever real.
