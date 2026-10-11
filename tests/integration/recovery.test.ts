@@ -1,10 +1,11 @@
-import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import type { RootConfig, Snapshot } from '../../src/domain/contracts.js';
 import { createRepositories } from '../../src/adapters/persistence/repositories.js';
+import { sha256Hex } from '../helpers/workflow-world.js';
 import {
   reconcileAction,
   type LocationObservations,
@@ -14,10 +15,6 @@ const fixtures: string[] = [];
 afterAll(() => {
   for (const dir of fixtures) rmSync(dir, { recursive: true, force: true });
 });
-
-function sha256Hex(input: string | Buffer): string {
-  return createHash('sha256').update(input).digest('hex');
-}
 
 const expectedSnapshot: Snapshot = {
   device: '65026',
@@ -115,7 +112,7 @@ describe('reconcileAction — interrupted work without duplicate moves', () => {
 describe('resumeBatch and undo on synthetic roots', () => {
   it('resumes a lost receipt without re-running the move, and rejects expired approvals', async () => {
     const { ApplicationService } = await import('../../src/application/workflow.js');
-    const dir = mkdtempSync(join('/tmp/opencode', 'recovery-'));
+    const dir = mkdtempSync(join(tmpdir(), 'recovery-'));
     fixtures.push(dir);
     const rootDir = join(dir, 'Downloads');
     mkdirSync(join(rootDir, 'Documents'), { recursive: true });
@@ -323,7 +320,7 @@ describe('resumeBatch and undo on synthetic roots', () => {
 
   it('undoes a verified move and refuses an occupied original location', async () => {
     const { ApplicationService } = await import('../../src/application/workflow.js');
-    const dir = mkdtempSync(join('/tmp/opencode', 'undo-'));
+    const dir = mkdtempSync(join(tmpdir(), 'undo-'));
     fixtures.push(dir);
     const rootDir = join(dir, 'Downloads');
     mkdirSync(join(rootDir, 'Documents'), { recursive: true });

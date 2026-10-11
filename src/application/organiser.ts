@@ -131,6 +131,13 @@ export class Organiser {
       helper: this.helper,
       clock: this.clock,
       destinations: this.destinations,
+      // Durable current revisions (spec review R1): approvals validate against
+      // what is stored, never against the approval's own bound values.
+      currentTaxonomyRevision: () => this.repositories.taxonomies.latest()?.revision ?? this.taxonomy.revision,
+      currentPolicyRevision: () => {
+        const root = this.root === null ? null : this.repositories.roots.get(this.root.rootId);
+        return root?.policyRevision ?? this.root?.policyRevision ?? 1;
+      },
     };
     if (options.faultHook !== undefined) workflowDeps.faultHook = options.faultHook;
     this.service = new ApplicationService(workflowDeps);
@@ -141,6 +148,19 @@ export class Organiser {
       tree: [{ id: 'root', parentId: null, label: 'Inbox', description: 'Root grouping', destinationId: null, kind: 'group' }],
       mappingHash: createHash('sha256').update('empty').digest('hex'),
     };
+    // Durable current taxonomy (spec review R1/R9): a restarted process must
+    // see the reviewed revision, not reset to the seed.
+    const storedTaxonomy = this.repositories.taxonomies.latest();
+    if (storedTaxonomy !== null) {
+      this.taxonomy.revision = storedTaxonomy.revision + 1;
+      this.taxonomy.mappingHash = storedTaxonomy.mappingHash;
+      try {
+        const parsed = JSON.parse(storedTaxonomy.treeJson) as Category[];
+        if (Array.isArray(parsed) && parsed.length > 0) this.taxonomy.tree = parsed;
+      } catch {
+        // A corrupt stored tree keeps the seed tree; the next review replaces it.
+      }
+    }
     this.configuredRootPath = options.rootPath;
     if (options.rootPath !== undefined) {
       // Root resolution failures must surface, never fall back silently to
@@ -417,7 +437,12 @@ export class Organiser {
   patchProposal(proposalId: Id, patch: { expectedVersion: Revision; categoryId?: Id; destinationId?: Id; reject?: boolean }): Promise<Result<Proposal>> {
     const proposal = this.repositories.proposals.get(proposalId);
     if (proposal === null) return Promise.resolve({ ok: false as const, code: 'OUT_OF_SCOPE' as const, detail: `unknown proposal ${proposalId}` });
-    if (patch.reject === true) return Promise.resolve(rejectProposal(proposal, patch.expectedVersion));
+    if (patch.reject === true) {
+      // Spec review R4: a rejection is persisted, not just returned.
+      const rejected = rejectProposal(proposal, patch.expectedVersion);
+      if (rejected.ok) this.repositories.proposals.save(rejected.value);
+      return Promise.resolve(rejected);
+    }
     const patchInput: { expectedVersion: Revision; categoryId?: Id; destinationId?: Id } = {
       expectedVersion: patch.expectedVersion,
     };
@@ -574,9 +599,20 @@ export class Organiser {
     const destinations = [...this.destinations.values()];
     const validated = validateTaxonomy(body.tree, destinations);
     if (!validated.ok) return validated;
+    const previousRevision = this.taxonomy.revision;
     this.taxonomy.tree = validated.value.tree;
     this.taxonomy.mappingHash = validated.value.mappingHash;
     this.taxonomy.revision += 1;
+    // Durable + invalidating (spec review R1): the reviewed revision persists
+    // and every pending proposal bound to an older taxonomy revision becomes
+    // stale, so no outstanding approval keeps authorising the old tree.
+    this.repositories.taxonomies.save(
+      this.taxonomy.revision,
+      JSON.stringify(validated.value.tree),
+      validated.value.mappingHash,
+      this.clock().toISOString(),
+    );
+    this.repositories.proposals.markStaleBeforeRevision(previousRevision + 1);
     return ok({ revision: this.taxonomy.revision, mappingHash: validated.value.mappingHash });
   }
 

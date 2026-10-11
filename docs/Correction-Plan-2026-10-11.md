@@ -28,11 +28,18 @@ it (read-only scan recorded; taxonomy handoff pending).
 
 ## Phase 1 — approval and scope invariants (review step 1)
 
-- [ ] **R1** Enforce approval mode (`apply`/`undo`), current taxonomy+policy
+- [x] **R1** Enforce approval mode (`apply`/`undo`), current taxonomy+policy
   revisions, proposal eligibility and batch/root membership on every transport;
   invalidate proposals/approvals when taxonomy is replaced; revalidate before
   each effect. Negative tests: zero helper calls for wrong mode, stale
   revision, foreign batch, non-pending proposal.
+  Fixed: `applyBatch` requires mode `apply` and `approval.batchId === batchId`;
+  `undoAction` requires mode `undo`; `createApproval` requires pending state
+  and batch/root proposal membership; `currentContext` reads the durable
+  taxonomy revision (new `taxonomies` repository, loaded on construction so a
+  restart does not reset it) and the durable root policy revision. Six
+  negative authorisation tests in approval-authorisation.test.ts, all through
+  the real ApplicationService/Organiser wiring.
 - [ ] **R2** Persist root/destination identity (device+inode) with the approved
   action; compare current observation against the approved pins; a renamed
   destination must surface a conflict, not silently re-pin. Discovery refresh
@@ -41,9 +48,14 @@ it (read-only scan recorded; taxonomy handoff pending).
   anchored, no-symlink/no-mount resolution and verifies the opened descriptor
   against the scanned snapshot before extraction; symlink-to-outside-root
   must defer with a visible conflict, never extract private content.
-- [ ] **R4** Monotonic proposal versions; persist rejection; regeneration must
+- [x] **R4** Monotonic proposal versions; persist rejection; regeneration must
   not revive an invalidated approval; eligibility validated in the domain
   service. Tests: edit→classify-again, reject→reload, apply→regenerate.
+  Fixed: the proposal upsert now refuses to lower a version or to resurrect a
+  rejected row (`WHERE proposals.version <= excluded.version AND state <>
+  'rejected'`), `patchProposal` persists rejections, and approval creation
+  enforces pending eligibility. Regeneration tests: edit survives
+  re-classification, version-1 approval refused, rejection survives reload.
 - [x] **R7** Native `probe_kernel()` must never rename user files: use an
   application-owned probe location, treat unexpected errnos (EEXIST etc.) as
   *unsupported/blocked*, not success, and assert no user-root mutation.

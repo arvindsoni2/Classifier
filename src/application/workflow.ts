@@ -70,6 +70,11 @@ export interface WorkflowDeps {
   /** Fault injection for crash simulation; may throw CrashSignal. */
   faultHook?: (point: FaultPoint, context: { actionId: string; proposalId: string }) => void;
   requestId?: () => string;
+  /** Durable current taxonomy revision (spec review R1: validate against
+   *  durable state, not the approval's own bound values). */
+  currentTaxonomyRevision?: () => Revision;
+  /** Durable current policy revision from the root record. */
+  currentPolicyRevision?: () => Revision;
 }
 
 export type ActionOutcome =
@@ -101,6 +106,10 @@ export class ApplicationService {
   private readonly destinations: Map<Id, Destination>;
   private readonly faultHook?: WorkflowDeps['faultHook'];
   private readonly requestIdFn: () => string;
+  /** Durable current taxonomy revision, supplied by the application (R1). */
+  private readonly currentTaxonomyRevisionFn?: () => Revision;
+  /** Durable current policy revision, supplied by the application (R1). */
+  private readonly currentPolicyRevisionFn?: () => Revision;
   /** The writer lock: one apply/recovery operation at a time (LLD §4). */
   private writerLock: Promise<unknown> = Promise.resolve();
 
@@ -111,6 +120,12 @@ export class ApplicationService {
     this.destinations = deps.destinations;
     this.faultHook = deps.faultHook;
     this.requestIdFn = deps.requestId ?? (() => `req-${randomUUID()}`);
+    if (deps.currentTaxonomyRevision !== undefined) {
+      this.currentTaxonomyRevisionFn = deps.currentTaxonomyRevision;
+    }
+    if (deps.currentPolicyRevision !== undefined) {
+      this.currentPolicyRevisionFn = deps.currentPolicyRevision;
+    }
   }
 
   /** Creates and journals an approval binding the current versions. */
@@ -126,10 +141,23 @@ export class ApplicationService {
       if (proposal === null || proposal.version !== action.version) {
         return err('STALE', `proposal ${action.proposalId} is not at version ${action.version}`);
       }
+      // Eligibility (spec review R4): only a pending proposal can be approved;
+      // rejected, stale or already-approved proposals are refused.
+      if (proposal.state !== 'pending') {
+        return err('STALE', `proposal ${action.proposalId} is ${proposal.state} and cannot be approved`);
+      }
       selected.push(proposal);
     }
     const batch = this.repositories.batches.get(batchId);
     if (batch === null) return err('OUT_OF_SCOPE', `unknown batch ${batchId}`);
+    // Batch/root membership: an approval can only bind proposals scanned into
+    // its own batch root (spec review R1).
+    const rootItems = new Set(this.repositories.items.listByRoot(batch.rootId).map((row) => row.item.id));
+    for (const proposal of selected) {
+      if (!rootItems.has(proposal.itemId)) {
+        return err('OUT_OF_SCOPE', `proposal ${proposal.id} does not belong to batch ${batchId}`);
+      }
+    }
     const created = createApprovalCore(batch, selected, mode, now);
     if (!created.ok) return created;
     this.repositories.approvals.insert({
@@ -163,11 +191,14 @@ export class ApplicationService {
       return { proposalId: action.proposalId, version: proposal?.version ?? -1 };
     });
     const first = this.repositories.proposals.get(approvalActions[0]?.proposalId ?? '');
-    return {
-      taxonomyRevision: first?.taxonomyRevision ?? 0,
-      policyRevision: first?.policyRevision ?? 0,
-      actions: current,
-    };
+    // Durable current state (spec review R1): the taxonomy revision comes from
+    // the persisted reviewed revision when the application supplies it, and
+    // the policy revision from the root record — never from the approval's
+    // own bound values or from whichever proposal happens to be first.
+    const taxonomyRevision =
+      this.currentTaxonomyRevisionFn?.() ?? first?.taxonomyRevision ?? 0;
+    const policyRevision = this.currentPolicyRevisionFn?.() ?? first?.policyRevision ?? 0;
+    return { taxonomyRevision, policyRevision, actions: current };
   }
 
   private approvalValid(approvalId: Id | null): boolean {
@@ -212,6 +243,32 @@ export class ApplicationService {
         return {
           batchId,
           results: [],
+        };
+      }
+      // Mode separation (spec review R1): an apply approval can only apply.
+      if (approval.mode !== 'apply') {
+        const selectedForMode = JSON.parse(approval.selectedActionsJson) as { proposalId: Id }[];
+        return {
+          batchId,
+          results: selectedForMode.map((action) => ({
+            actionId: action.proposalId,
+            proposalId: action.proposalId,
+            outcome: 'stale' as ActionOutcome,
+            detail: `approval ${approval.id} has mode ${approval.mode}; an apply approval is required; nothing executed`,
+          })),
+        };
+      }
+      // Batch membership: an approval authorises its own batch only.
+      if (approval.batchId !== batchId) {
+        const selectedForBatch = JSON.parse(approval.selectedActionsJson) as { proposalId: Id }[];
+        return {
+          batchId,
+          results: selectedForBatch.map((action) => ({
+            actionId: action.proposalId,
+            proposalId: action.proposalId,
+            outcome: 'stale' as ActionOutcome,
+            detail: `approval is bound to batch ${approval.batchId}, not ${batchId}; nothing executed`,
+          })),
         };
       }
       const selected = JSON.parse(approval.selectedActionsJson) as {
@@ -613,6 +670,10 @@ export class ApplicationService {
       const receipt = JSON.parse(action.receiptJson) as MoveReceipt;
       const undoApproval = this.repositories.approvals.get(undoApprovalId);
       if (undoApproval === null) return err('UNAUTHORISED', 'unknown undo approval');
+      // Mode separation (spec review R1): undo needs an undo approval.
+      if (undoApproval.mode !== 'undo') {
+        return err('UNAUTHORISED', `approval ${undoApproval.id} has mode ${undoApproval.mode}; an undo approval is required`);
+      }
       const undoSelected = JSON.parse(undoApproval.selectedActionsJson) as {
         proposalId: Id;
         version: Revision;

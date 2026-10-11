@@ -10,7 +10,7 @@
 import Database from 'better-sqlite3';
 import { createHash, randomUUID } from 'node:crypto';
 import { chmodSync, readFileSync } from 'node:fs';
-import type { Id, Item, Proposal, Revision, Snapshot } from '../../domain/contracts.js';
+import type { Id, Item, Proposal, Revision, Sha256, Snapshot } from '../../domain/contracts.js';
 
 export interface RootRecord {
   id: Id;
@@ -102,6 +102,14 @@ export interface Repositories {
     save(proposal: Proposal): void;
     get(id: Id): Proposal | null;
     listByRoot(rootId: Id): Proposal[];
+    /** Marks pending proposals bound to an older taxonomy revision stale. */
+    markStaleBeforeRevision(revision: Revision): void;
+  };
+  taxonomies: {
+    /** Persists the reviewed taxonomy revision (durable current state). */
+    save(revision: Revision, treeJson: string, mappingHash: Sha256, approvedAt: string): void;
+    /** The latest persisted revision, or null when none was approved yet. */
+    latest(): { revision: Revision; treeJson: string; mappingHash: Sha256 } | null;
   };
   approvals: {
     insert(approval: ApprovalRecord): void;
@@ -255,7 +263,27 @@ export function createRepositories(dbPath: string): Repositories {
        taxonomy_revision = excluded.taxonomy_revision,
        policy_revision = excluded.policy_revision,
        decision_ids_json = excluded.decision_ids_json,
-       state = excluded.state`,
+       state = excluded.state
+     WHERE proposals.version <= excluded.version
+       AND proposals.state <> 'rejected'`,
+  );
+  // Regeneration replays the deterministic version-1 plan. A stored row at a
+  // higher version is a user correction and an explicitly rejected proposal
+  // stays rejected until the user removes it: both survive re-classification
+  // (spec review R4). The WHERE clauses above enforce that at the writer.
+  const markStaleBeforeRevision = db.prepare(
+    `UPDATE proposals SET state = 'stale' WHERE taxonomy_revision < ? AND state = 'pending'`,
+  );
+  const insertTaxonomy = db.prepare(
+    `INSERT INTO taxonomy_revisions (revision, approved_at, tree_json, mapping_hash)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(revision) DO UPDATE SET
+       approved_at = excluded.approved_at,
+       tree_json = excluded.tree_json,
+       mapping_hash = excluded.mapping_hash`,
+  );
+  const latestTaxonomy = db.prepare(
+    'SELECT * FROM taxonomy_revisions ORDER BY revision DESC LIMIT 1',
   );
   const getProposal = db.prepare('SELECT * FROM proposals WHERE id = ?');
   const listProposalsByRoot = db.prepare(
@@ -356,6 +384,18 @@ export function createRepositories(dbPath: string): Repositories {
         }));
       },
     },
+    taxonomies: {
+      save(revision, treeJson, mappingHash, approvedAt) {
+        insertTaxonomy.run(revision, approvedAt, treeJson, mappingHash);
+      },
+      latest() {
+        const row = latestTaxonomy.get() as
+          | { revision: number; tree_json: string; mapping_hash: string }
+          | undefined;
+        if (row === undefined) return null;
+        return { revision: row.revision, treeJson: row.tree_json, mappingHash: row.mapping_hash };
+      },
+    },
     batches: {
       create(rootId) {
         const batch: Batch = {
@@ -416,6 +456,9 @@ export function createRepositories(dbPath: string): Repositories {
           JSON.stringify(proposal.decisionIds),
           proposal.state,
         );
+      },
+      markStaleBeforeRevision(revision) {
+        markStaleBeforeRevision.run(revision);
       },
       get(id) {
         const row = getProposal.get(id) as ProposalRow | undefined;
