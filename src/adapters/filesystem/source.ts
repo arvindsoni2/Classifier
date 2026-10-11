@@ -62,6 +62,8 @@ interface DirectoryStat {
 export interface FilesystemDeps {
   clock?: DiscoveryClock;
   stat?: (path: string) => Promise<DirectoryStat>;
+  /** Stability window override (production keeps the 5 s PRD §3 spacing). */
+  stabilityWindowMs?: number;
 }
 
 function isErrnoException(e: unknown): e is NodeJS.ErrnoException {
@@ -117,12 +119,14 @@ export async function snapshot(handle: FileHandle): Promise<Result<Snapshot>> {
 export class FilesystemSource implements SourceAdapter {
   private readonly clock: DiscoveryClock;
   private readonly statPath: (path: string) => Promise<DirectoryStat>;
+  private readonly stabilityWindowMs: number;
   /** itemId -> path for items discovered by this instance (inspect support). */
   private readonly itemPaths = new Map<Id, string>();
 
   constructor(deps: FilesystemDeps = {}) {
     this.clock = deps.clock ?? realClock;
     this.statPath = deps.stat ?? stat;
+    this.stabilityWindowMs = deps.stabilityWindowMs ?? STABILITY_WINDOW_MS;
   }
 
   /**
@@ -140,15 +144,100 @@ export class FilesystemSource implements SourceAdapter {
     if (path === undefined) {
       return err('OUT_OF_SCOPE', `unknown item ${itemId}; discover first or load from the catalogue`);
     }
+    // Anchored, no-symlink inspection (spec review R3): the same refusal rules
+    // as evidence extraction, so no caller can read through a swapped path.
     try {
+      const st = await lstat(path, { bigint: true });
+      if (st.isSymbolicLink()) {
+        return err('OUT_OF_SCOPE', `${path} is a symlink; refusing to follow it out of the root`);
+      }
       const handle = await open(path, 'r');
       try {
-        return await snapshot(handle);
+        const observed = await snapshot(handle);
+        if (!observed.ok) return observed;
+        if (observed.value.inode !== st.ino.toString() || observed.value.device !== st.dev.toString()) {
+          return err('OUT_OF_SCOPE', `${path} changed between inspection and open; refusing to read a swapped file`);
+        }
+        return observed;
       } finally {
         await handle.close();
       }
     } catch (e) {
       return err('OUT_OF_SCOPE', `cannot inspect ${path}: ${detailOf(e)}`);
+    }
+  }
+
+  /**
+   * Opens a scanned candidate for evidence extraction through anchored,
+   * no-symlink resolution and verifies the opened descriptor against the
+   * snapshot taken at discovery (spec review R3). A symlink, a foreign
+   * device, a non-regular file or changed bytes are refused as visible
+   * conflicts — private content outside the root is never extracted.
+   */
+  async openCandidate(
+    config: RootConfig,
+    externalId: string,
+    expected: Snapshot | null,
+  ): Promise<Result<{ handle: FileHandle; observed: Snapshot }>> {
+    if (externalId === '' || externalId.includes('/') || externalId.includes('\0') || externalId === '.' || externalId === '..') {
+      return err('OUT_OF_SCOPE', `candidate name ${JSON.stringify(externalId)} is not a plain basename`);
+    }
+    const rootCheck = await this.rootStat(config);
+    if (!rootCheck.ok) return rootCheck;
+    const path = `${config.absolutePath}/${externalId}`;
+    try {
+      // (1) No symlink following: an lstat that reports a link refuses.
+      const before = await lstat(path, { bigint: true });
+      if (before.isSymbolicLink()) {
+        return err(
+          'OUT_OF_SCOPE',
+          `${externalId} is a symlink; refusing to read outside the scanned root`,
+        );
+      }
+      if (!before.isFile()) {
+        return err('OUT_OF_SCOPE', `${externalId} is not a regular file`);
+      }
+      // (2) No mount crossing: the candidate must stay on the root's device.
+      if (before.dev.toString() !== config.device) {
+        return err(
+          'OUT_OF_SCOPE',
+          `${externalId} is on another device; refusing to read across a mount boundary`,
+        );
+      }
+      const handle = await open(path, 'r');
+      try {
+        // (3) The opened descriptor must be the same file the lstat saw.
+        const opened = await handle.stat({ bigint: true });
+        if (opened.ino.toString() !== before.ino.toString() || opened.dev.toString() !== before.dev.toString()) {
+          return err(
+            'OUT_OF_SCOPE',
+            `${externalId} changed between inspection and open; refusing to read a swapped file`,
+          );
+        }
+        const observed = await snapshot(handle);
+        if (!observed.ok) return observed;
+        // (4) The snapshot recorded at discovery must still hold.
+        if (expected !== null) {
+          if (observed.value.sha256 !== expected.sha256) {
+            return err(
+              'STALE',
+              `${externalId} changed since it was scanned; re-scan before classifying`,
+            );
+          }
+          if (observed.value.inode !== expected.inode || observed.value.device !== expected.device) {
+            return err(
+              'STALE',
+              `${externalId} was replaced since it was scanned; re-scan before classifying`,
+            );
+          }
+        }
+        return ok({ handle, observed: observed.value });
+      } catch (e) {
+        await handle.close();
+        throw e;
+      }
+    } catch (e) {
+      return err('OUT_OF_SCOPE', `cannot open ${path}: ${detailOf(e)}`);
     }
   }
 
@@ -238,8 +327,8 @@ export class FilesystemSource implements SourceAdapter {
       }
     }
 
-    // One stability window per batch: two observations >= 5 s apart.
-    await this.clock.sleep(STABILITY_WINDOW_MS);
+    // One stability window per batch: two observations a window apart.
+    await this.clock.sleep(this.stabilityWindowMs);
 
     const settled: { name: string; second: BigIntStats }[] = [];
     for (const candidate of candidates) {

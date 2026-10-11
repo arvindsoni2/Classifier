@@ -53,10 +53,21 @@ it (read-only scan recorded; taxonomy handoff pending).
   never a re-pin. An approval without pins (pre-migration row) requires
   re-approval. Tests: replaced destination, changed root identity, and the
   stable happy path.
-- [ ] **R3** Classification opens files through the source adapter with
+- [x] **R3** Classification opens files through the source adapter with
   anchored, no-symlink/no-mount resolution and verifies the opened descriptor
   against the scanned snapshot before extraction; symlink-to-outside-root
   must defer with a visible conflict, never extract private content.
+  Fixed: `FilesystemSource.openCandidate(root, externalId, expected)` refuses
+  non-basename names, verifies root identity, refuses symlinks (lstat) and
+  non-regular files, refuses foreign devices, re-verifies the opened fd
+  against the pre-open lstat, and compares the recorded snapshot
+  (sha256/inode/device) before returning the handle. `classify` opens through
+  it and reports refusals as visible `conflicts` in `ClassifyResult`;
+  `inspect()` gained the same no-symlink guard. The Organiser's
+  `stabilityWindowMs` option now actually reaches discovery (it was silently
+  ignored; one hardcoded 5 s window per batch). Tests: post-scan symlink to a
+  private outside file is refused with no proposal, changed bytes defer, an
+  unchanged item still reaches the provider.
 - [x] **R4** Monotonic proposal versions; persist rejection; regeneration must
   not revive an invalidated approval; eligibility validated in the domain
   service. Tests: edit→classify-again, reject→reload, apply→regenerate.

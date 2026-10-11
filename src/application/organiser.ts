@@ -60,6 +60,8 @@ export interface ClassifyResult {
   provider: string;
   /** Basenames the provider deferred (unknown/insufficient evidence). */
   deferredItems: string[];
+  /** Scope/identity refusals: symlinks, foreign devices, changed bytes (R3). */
+  conflicts?: { basename: string; reason: string }[];
 }
 
 const DEFAULT_VOCABULARY = {
@@ -110,6 +112,9 @@ export class Organiser {
     this.clock = () => new Date();
     this.extractionLimits = options.extractionLimits ?? defaultExtractionLimits();
     this.source = new FilesystemSource({
+      // The configured window reaches discovery: tests shrink it, production
+      // keeps the PRD §3 spacing.
+      stabilityWindowMs: this.stabilityWindowMs,
       clock: {
         now: () => this.clock().getTime(),
         sleep: (ms: number) =>
@@ -270,20 +275,24 @@ export class Organiser {
     const items = this.itemsForRoot(root.rootId);
     let proposals = 0;
     const deferredItems: string[] = [];
+    /** Scope/identity refusals surfaced as visible conflicts (spec review R3). */
+    const conflicts: { basename: string; reason: string }[] = [];
     let failed = 0;
     const manifest = await provider.health();
     const manifests = manifest.ok ? [manifest.value] : [];
 
     const extractor = createExtractor();
     for (const item of items) {
-      // Evidence: the adapter owns the opened handle, never a UI path.
-      const path = `${root.absolutePath}/${item.externalId}`;
-      const { open } = await import('node:fs/promises');
-      let handle;
+      // Evidence: the adapter owns the opened handle through anchored,
+      // no-symlink resolution and verifies the scanned snapshot (R3).
+      const opened = await this.source.openCandidate(root, item.externalId, item.snapshot);
+      if (!opened.ok) {
+        conflicts.push({ basename: item.externalId, reason: opened.detail });
+        continue;
+      }
       try {
-        handle = await open(path, 'r');
-        const size = (await handle.stat({ bigint: true })).size;
-        const evidence = await extractor.extractEvidence(item, { handle, size: Number(size) }, this.extractionLimits);
+        const size = Number(opened.value.observed.size);
+        const evidence = await extractor.extractEvidence(item, { handle: opened.value.handle, size }, this.extractionLimits);
         if (!evidence.ok) {
           failed += 1;
           continue;
@@ -317,10 +326,18 @@ export class Organiser {
         this.repositories.proposals.save({ ...planned.value, decisionIds: [decision.value.id] });
         proposals += 1;
       } finally {
-        await handle?.close();
+        await opened.value.handle.close();
       }
     }
-    return { batchId: batch, proposals, deferred: deferredItems.length, failed, provider: provider.providerId, deferredItems };
+    return {
+      batchId: batch,
+      proposals,
+      deferred: deferredItems.length,
+      failed,
+      provider: provider.providerId,
+      deferredItems,
+      conflicts,
+    };
   }
 
   /** Routes one question per taxonomy level through the provider. */
