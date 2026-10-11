@@ -11,15 +11,19 @@ import {
   type Category,
   type Decision,
   type DecisionProvider,
+  type ErrorCode,
   type Evidence,
+  type FolderCandidate,
   type Id,
   type Item,
+  type ProviderId,
   type Proposal,
   type Result,
   type Revision,
   type RootConfig,
 } from '../domain/contracts.js';
 import { planPlacement, suggestFolderGroups, validateApproval } from '../domain/planner.js';
+import { UNKNOWN_OPTION_ID } from '../domain/contracts.js';
 import { patchProposal, rejectProposal } from '../domain/policy.js';
 import { validateTaxonomy, buildMatchedRequest, type Taxonomy } from '../domain/taxonomy.js';
 import { createRepositories, type Repositories } from '../adapters/persistence/repositories.js';
@@ -302,19 +306,23 @@ export class Organiser {
           // Metadata-only evidence: try the provider anyway; it defers if
           // it cannot place the item (FR-05).
         }
-        const decision = await this.decideRoute(provider, evidenceValue, manifests, profile);
-        if (!decision.ok) {
+        const routed = await this.decideRoute(provider, evidenceValue, manifests, profile);
+        if (!routed.ok) {
           failed += 1;
-          if (process.env.ORGANISER_DEBUG === '1') console.error('decideRoute failed', decision.detail);
+          if (process.env.ORGANISER_DEBUG === '1') console.error('decideRoute failed', routed.detail);
           continue;
         }
-        if (decision.value.answers.at(-1)?.selectedId === 'unknown') {
+        // The provider's own decision is persisted with its real provenance
+        // (spec review R12); the routing wrapper stays derived.
+        const decisionId = routed.value.decision === null ? null : this.persistDecision(item, routed.value.decision);
+        const decision = routed.value.route;
+        if (decision.answers.at(-1)?.selectedId === 'unknown') {
           deferredItems.push(item.externalId);
           continue;
         }
         const planned = planPlacement(
           { ...item, evidenceId: evidenceValue.id },
-          { answers: decision.value.answers.map((answer) => ({ nodeId: 'root', questionId: answer.questionId, selectedId: answer.selectedId })) },
+          { answers: decision.answers.map((answer) => ({ nodeId: 'root', questionId: answer.questionId, selectedId: answer.selectedId })) },
           this.taxonomy,
           root.policyRevision,
         );
@@ -323,7 +331,10 @@ export class Organiser {
           if (process.env.ORGANISER_DEBUG === '1') console.error('planPlacement failed', planned.detail);
           continue;
         }
-        this.repositories.proposals.save({ ...planned.value, decisionIds: [decision.value.id] });
+        this.repositories.proposals.save({
+          ...planned.value,
+          decisionIds: decisionId === null ? [] : [decisionId],
+        });
         proposals += 1;
       } finally {
         await opened.value.handle.close();
@@ -346,9 +357,10 @@ export class Organiser {
     evidenceValue: Evidence,
     manifests: Parameters<typeof buildMatchedRequest>[2],
     profile: 'metadata' | 'compact_text',
-  ): Promise<Result<Decision>> {
+  ): Promise<Result<{ route: Decision; decision: Decision | null }>> {
     let nodeId: Id = 'root';
     const answers: Decision['answers'] = [];
+    const providerDecisions: Decision[] = [];
     for (let level = 0; level < 4; level++) {
       const children = this.taxonomy.tree.filter((category) => category.parentId === nodeId);
       const node = this.taxonomy.tree.find((category) => category.id === nodeId);
@@ -361,6 +373,7 @@ export class Organiser {
       if (!request.ok) return request;
       const result = await provider.decide(request.value);
       if (!result.ok) return result;
+      providerDecisions.push(result.value);
       const answer = result.value.answers[0];
       if (answer === undefined) {
         return { ok: false, code: 'INVALID_DECISION', detail: 'provider returned no answer' };
@@ -375,19 +388,45 @@ export class Organiser {
     if (first === undefined) {
       return { ok: false, code: 'INVALID_DECISION', detail: 'no routing answers' };
     }
+    // The routing wrapper is derived; provenance (model revision, evidence
+    // hash, timing) stays the provider's own decision (spec review R12).
     return ok({
-      id: `decision-${first.questionId}-${answers.length}`,
-      itemId: evidenceValue.itemId,
-      provider: provider.providerId,
-      modelRevision: 'route',
-      runtimeRevision: process.version,
-      evidenceHash: evidenceValue.stateHash,
-      schemaHash: 'route',
-      answers,
-      elapsedMs: 0,
-      tokenCounts: {},
-      error: null,
+      route: {
+        id: `decision-${first.questionId}-${answers.length}`,
+        itemId: evidenceValue.itemId,
+        provider: provider.providerId,
+        modelRevision: 'route',
+        runtimeRevision: process.version,
+        evidenceHash: evidenceValue.stateHash,
+        schemaHash: 'route',
+        answers,
+        elapsedMs: 0,
+        tokenCounts: {},
+        error: null,
+      },
+      decision: providerDecisions[providerDecisions.length - 1] ?? null,
     });
+  }
+
+  /** Persists the provider's own decision with real provenance (R12). */
+  private persistDecision(item: Item, decision: Decision): Id {
+    // The provider's decision id is per question; the persisted row must be
+    // unique per item, so the item is part of the key.
+    const id = `decision-${item.id}-${decision.id}`;
+    this.repositories.decisions.save({
+      id,
+      itemId: item.id,
+      provider: decision.provider,
+      modelRevision: decision.modelRevision,
+      runtimeRevision: decision.runtimeRevision,
+      evidenceHash: decision.evidenceHash,
+      schemaHash: decision.schemaHash,
+      answersJson: JSON.stringify(decision.answers),
+      elapsedMs: decision.elapsedMs,
+      tokenCountsJson: JSON.stringify(decision.tokenCounts),
+      error: decision.error,
+    });
+    return id;
   }
 
   private treatEvidence(evidence: Parameters<DecisionProvider['decide']>[0]['evidence'], profile: 'metadata' | 'compact_text') {
@@ -669,11 +708,13 @@ export class Organiser {
     return result;
   }
 
-  /** HTTP surface: create one reviewed folder segment (FR-06). */
+  /**
+   * HTTP surface: propose one reviewed folder segment (FR-06, spec review R10).
+   * The proposal is logical: the directory is created by approved execution,
+   * never by this request.
+   */
   mkdirFolder(batchId: Id, body: { parentSegments: string[]; segment: string; label: string }): Promise<Result<unknown>> {
-    return this.ensureRoot().then((root) =>
-      this.service.mkdirAt(root, body.parentSegments, body.segment, batchId, body.label),
-    );
+    return this.service.proposeFolder(body.parentSegments, body.segment, batchId, body.label);
   }
 
   /** HTTP surface: reviewed folder groups. */
@@ -702,11 +743,39 @@ export class Organiser {
   }
 
   /** Suggests reviewed folder groups from deferred items (FR-06). */
-  folderGroups(batchId?: Id) {
+  /**
+   * Suggested new folders from items whose classification deferred to unknown
+   * (spec review R10): the groups come from the persisted provider decisions,
+   * so a suggestion is auditable evidence rather than a fresh guess.
+   */
+  folderGroups(batchId?: Id): FolderCandidate[] {
     const batch = this.currentBatch(batchId);
     if (batch === null) return [];
     const items = this.itemsForRoot(batch.rootId);
-    return suggestFolderGroups(items, [], DEFAULT_VOCABULARY);
+    const rows = this.repositories.decisions.listByRoot(batch.rootId);
+    const itemsById = new Map(items.map((item) => [item.id, item]));
+    const decisions: Decision[] = [];
+    for (const row of rows) {
+      const item = itemsById.get(row.decision.itemId);
+      if (item === undefined) continue;
+      const answers = JSON.parse(row.decision.answersJson) as Decision['answers'];
+      const last = answers[answers.length - 1];
+      if (last === undefined || last.selectedId !== UNKNOWN_OPTION_ID) continue;
+      decisions.push({
+        id: row.decision.id,
+        itemId: row.decision.itemId,
+        provider: row.decision.provider as ProviderId,
+        modelRevision: row.decision.modelRevision,
+        runtimeRevision: row.decision.runtimeRevision,
+        evidenceHash: row.decision.evidenceHash,
+        schemaHash: row.decision.schemaHash,
+        answers,
+        elapsedMs: row.decision.elapsedMs,
+        tokenCounts: JSON.parse(row.decision.tokenCountsJson) as Decision['tokenCounts'],
+        error: row.decision.error as ErrorCode | null,
+      });
+    }
+    return suggestFolderGroups(items, decisions, DEFAULT_VOCABULARY);
   }
 
   validateApprovalFor(approvalId: Id): boolean {

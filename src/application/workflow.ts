@@ -6,7 +6,7 @@
  * journal — never by blindly re-running a filesystem syscall.
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   err,
   ok,
@@ -1312,32 +1312,43 @@ export class ApplicationService {
    * group is accepted, and the directory already exists until then only if
    * the user asked for it.
    */
-  mkdirAt(
-    root: RootConfig,
+  /**
+   * Proposes a reviewed new folder (spec review R10). The physical directory
+   * is NOT created here: this persists a logical candidate bound to the real
+   * parent destination identity, and approved execution materialises it later.
+   * The old behaviour mkdir'd immediately with a fabricated root inode as the
+   * parent pin, which bypassed the approval workflow entirely.
+   */
+  proposeFolder(
     parentSegments: readonly string[],
     segment: string,
     batchId: Id,
     label: string,
-  ): Promise<Result<Destination>> {
+  ): Promise<Result<{ candidateId: Id; parentId: Id; parentSegments: string[]; segment: string; reviewState: 'draft' }>> {
     return this.withWriterLock(async () => {
-      const parent: Destination = {
-        id: `dest-${JSON.stringify(parentSegments).slice(0, 32)}`,
-        segments: [...parentSegments],
-        device: root.device,
-        inode: root.inode,
-        status: 'observed',
-      };
-      const created = await this.helper.mkdirAt(root, parent, segment);
-      if (!created.ok) return created;
+      const parent = this.destinationForSegments([...parentSegments]);
+      if (parent === undefined) {
+        return err(
+          'OUT_OF_SCOPE',
+          `parent ${parentSegments.join('/') || '.'} is not in the discovery catalogue; scan before proposing a folder`,
+        );
+      }
+      if (segment === '' || segment.includes('/') || segment === '.' || segment === '..') {
+        return err('INVALID_DECISION', `segment ${JSON.stringify(segment)} is not a single path component`);
+      }
+      const candidateId = `folder-candidate-${createHash('sha256')
+        .update(`${batchId}|${parent.id}|${segment}`)
+        .digest('hex')
+        .slice(0, 40)}`;
       this.repositories.folderCandidates.insert({
-        id: created.value.id,
+        id: candidateId,
         batchId,
         label,
         membersJson: JSON.stringify([]),
-        destinationParentId: created.value.id,
+        destinationParentId: parent.id,
         reviewState: 'draft',
       });
-      return ok(created.value);
+      return ok({ candidateId, parentId: parent.id, parentSegments: [...parentSegments], segment, reviewState: 'draft' as const });
     });
   }
 

@@ -53,6 +53,20 @@ export interface WriterLockOwner {
   owner: string;
 }
 
+export interface DecisionRecord {
+  id: Id;
+  itemId: Id;
+  provider: string;
+  modelRevision: string;
+  runtimeRevision: string;
+  evidenceHash: string;
+  schemaHash: string;
+  answersJson: string;
+  elapsedMs: number;
+  tokenCountsJson: string;
+  error: string | null;
+}
+
 export interface ActionRecord {
   id: Id;
   proposalId: Id;
@@ -151,6 +165,11 @@ export interface Repositories {
     listByApproval(approvalId: Id): ActionRecord[];
     update(actionId: Id, update: { state: string; receiptJson?: string | null }): void;
   };
+  decisions: {
+    save(decision: DecisionRecord): void;
+    listByRoot(rootId: Id): { decision: DecisionRecord; rootId: Id }[];
+    listByItem(itemId: Id): DecisionRecord[];
+  };
   locks: {
     /**
      * Claims the root for one writer (apply/recovery/undo) and returns the
@@ -180,6 +199,36 @@ interface ApprovalRow {
   expires_at: string;
   mode: string;
   pins_json: string | null;
+}
+
+interface DecisionRow {
+  id: string;
+  item_id: string;
+  provider: string;
+  model_revision: string;
+  runtime_revision: string;
+  evidence_hash: string;
+  schema_hash: string;
+  answers_json: string;
+  elapsed_ms: number;
+  token_counts_json: string;
+  error: string | null;
+}
+
+function mapDecisionRow(row: DecisionRow): DecisionRecord {
+  return {
+    id: row.id,
+    itemId: row.item_id,
+    provider: row.provider,
+    modelRevision: row.model_revision,
+    runtimeRevision: row.runtime_revision,
+    evidenceHash: row.evidence_hash,
+    schemaHash: row.schema_hash,
+    answersJson: row.answers_json,
+    elapsedMs: row.elapsed_ms,
+    tokenCountsJson: row.token_counts_json,
+    error: row.error,
+  };
 }
 
 interface FolderCandidateRow {
@@ -438,6 +487,16 @@ export function createRepositories(dbPath: string): Repositories {
      WHERE writer_locks.owner = excluded.owner OR writer_locks.acquired_at < ?`,
   );
   const releaseLock = db.prepare('DELETE FROM writer_locks WHERE root_id = ? AND owner = ?');
+  const insertDecision = db.prepare(
+    `INSERT OR REPLACE INTO decisions (id, item_id, provider, model_revision, runtime_revision,
+       evidence_hash, schema_hash, answers_json, elapsed_ms, token_counts_json, error)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  const listDecisionsByRoot = db.prepare(
+    `SELECT d.*, i.root_id as root_id FROM decisions d JOIN items i ON i.id = d.item_id
+     WHERE i.root_id = ? ORDER BY d.rowid`,
+  );
+  const listDecisionsByItem = db.prepare('SELECT * FROM decisions WHERE item_id = ? ORDER BY rowid');
   const insertFolderCandidate = db.prepare(
     `INSERT INTO folder_candidates (id, batch_id, label, members_json, destination_parent_id, review_state)
      VALUES (?, ?, ?, ?, ?, ?)`,
@@ -678,6 +737,30 @@ export function createRepositories(dbPath: string): Repositories {
       },
       update(actionId, update) {
         updateAction.run(update.state, update.receiptJson ?? null, actionId);
+      },
+    },
+    decisions: {
+      save(decision) {
+        insertDecision.run(
+          decision.id,
+          decision.itemId,
+          decision.provider,
+          decision.modelRevision,
+          decision.runtimeRevision,
+          decision.evidenceHash,
+          decision.schemaHash,
+          decision.answersJson,
+          decision.elapsedMs,
+          decision.tokenCountsJson,
+          decision.error,
+        );
+      },
+      listByRoot(rootId) {
+        const rows = listDecisionsByRoot.all(rootId) as (DecisionRow & { root_id: string })[];
+        return rows.map((row) => ({ decision: mapDecisionRow(row), rootId: row.root_id }));
+      },
+      listByItem(itemId) {
+        return (listDecisionsByItem.all(itemId) as DecisionRow[]).map(mapDecisionRow);
       },
     },
     locks: {

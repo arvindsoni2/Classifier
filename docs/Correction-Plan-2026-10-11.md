@@ -110,10 +110,24 @@ it (read-only scan recorded; taxonomy handoff pending).
   inodes, expected hashes, pins) and real journal payloads; add a root-scoped
   process lock for apply/recovery/undo; transactional claims. Tests: process
   restart after destination edit; concurrent resume from two processes.
-- [ ] **R10** New-folder workflow: logical candidates → reviewed mappings →
+- [x] **R10** New-folder workflow: logical candidates → reviewed mappings →
   physical `mkdir` deferred to approved execution; journal mkdir intent and
   created-directory identity; never adopt or delete an unknown directory;
   fsync the parent directory after mkdir.
+  Done: `folderGroups()` now derives suggestions from the **persisted provider
+  decisions** (deferrals to `unknown`), replacing the empty-decisions call
+  that could never produce a group; classify persists each provider decision
+  with its real provenance (provider, model revision, evidence hash, timing,
+  token counts) in the previously unused decisions repository, and proposals
+  link those decision ids. Folder creation is now **logical only**:
+  `proposeFolder()` persists a draft candidate bound to the real parent
+  destination identity from the catalogue (the old code fabricated a root
+  inode as the parent pin) and performs no filesystem mutation; an unknown
+  parent is refused. The native `mkdirat_exclusive` fsyncs the parent
+  directory and reports a failed fsync instead of silently succeeding.
+  Remaining for the R9 curation phase (tracked, not silently dropped):
+  materialising an accepted candidate inside approved execution with mkdir
+  intent/identity journalled — that path needs the curation workflow R9 adds.
 
 ## Phase 3 — usable production workflow (review step 3)
 

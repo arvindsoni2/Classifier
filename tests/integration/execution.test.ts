@@ -102,17 +102,31 @@ describe('applyBatch — crash at every effect boundary recovers without duplica
     });
   }
 
-  it('an unrecorded mkdir leaves the directory intact and awaits destination review', async () => {
+  it('a proposed folder stays logical until accepted (no filesystem effect)', async () => {
+    // Spec review R10: proposing a folder persists a logical candidate; the
+    // physical directory is created by approved execution, never by the
+    // proposal itself.
     const world = makeWorld('mkdir');
-    const created = await world.service.mkdirAt(world.root, ['Documents'], 'New Folder', world.batch.id, 'New Folder');
-    expect(created.ok).toBe(true);
-    expect(world.exists('Documents/New Folder')).toBe(true);
-    // The directory exists but is not yet an accepted destination.
+    const proposed = await world.service.proposeFolder(['Documents'], 'New Folder', world.batch.id, 'New Folder');
+    expect(proposed.ok).toBe(true);
+    // No filesystem effect from the proposal.
+    expect(world.exists('Documents/New Folder')).toBe(false);
+    // The candidate is persisted as a draft bound to the real parent identity.
     const candidates = world.repositories.folderCandidates.listByBatch(world.batch.id);
     expect(candidates.some((candidate) => candidate.label === 'New Folder')).toBe(true);
     expect(candidates.find((candidate) => candidate.label === 'New Folder')?.reviewState).toBe('draft');
-    // No proposal targets it until accepted.
-    const createdId = created.ok ? created.value.id : 'none';
-    expect(world.proposals.some((proposal) => proposal.destinationId === createdId)).toBe(false);
+    expect(candidates.find((candidate) => candidate.label === 'New Folder')?.destinationParentId).toBe('dest-invoices');
+    // No proposal targets it until it is accepted and materialised.
+    if (proposed.ok) {
+      expect(world.proposals.some((proposal) => proposal.destinationId === proposed.value.candidateId)).toBe(false);
+    }
+  });
+
+  it('refuses to propose a folder under an unknown parent', async () => {
+    const world = makeWorld('mkdir-unknown-parent');
+    const proposed = await world.service.proposeFolder(['Not', 'In', 'Catalogue'], 'New Folder', world.batch.id, 'New Folder');
+    expect(proposed.ok).toBe(false);
+    if (!proposed.ok) expect(proposed.code).toBe('OUT_OF_SCOPE');
+    expect(world.repositories.folderCandidates.listByBatch(world.batch.id)).toHaveLength(0);
   });
 });

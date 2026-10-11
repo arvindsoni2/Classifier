@@ -351,6 +351,13 @@ pub fn mkdirat_exclusive(
         }
         return Err(map_errno("mkdirat", errno));
     }
+    // The new directory entry must be durable before anything is journalled
+    // inside it (spec review R10): a crash may not lose the creation.
+    let fsync_rc = unsafe { libc::fsync(parent.fd()) };
+    if fsync_rc == -1 {
+        let errno = unsafe { *libc::__errno_location() };
+        return Err(map_errno("fsync", errno));
+    }
     let opened = openat2_raw(parent.fd(), segment, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)?;
     let stat = fstat_of(opened.as_raw_fd())?;
     Ok(DirHandle {
