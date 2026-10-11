@@ -1,9 +1,14 @@
 /**
- * Jev cloud reference provider (plan Task 4, LLD §3). Disabled unless the
- * dataset's explicit cloud consent is recorded; its endpoint is configured
- * explicitly, never guessed from documentation. With consent and an explicit
- * endpoint it probes a typed choice primitive and validates answers through
- * the same contract as every local provider.
+ * Jev cloud reference provider (plan Task 4, LLD §3) — DEFERRED (spec review
+ * R14). No verified Jev integration contract exists for this application: the
+ * `/v1/choice` request shape and the Clef-compatible response format are
+ * implementation assumptions, and a subscription that exposes a model does
+ * not establish a usable standalone API. The adapter therefore stays
+ * disabled/deferred until a verified contract, authentication and a
+ * dataset-scoped consent boundary are recorded, and it never widens cloud
+ * access on its own. The guarded path below exists only for that future
+ * verified integration and is inert unless `verifiedContract` is explicitly
+ * configured.
  */
 import { randomUUID } from 'node:crypto';
 import {
@@ -16,15 +21,24 @@ import {
   type ProviderManifest,
   type Result,
 } from '../../domain/contracts.js';
-import { parseSystemOneAnswer, assertLoopbackEndpoint, buildSystemOneRequest, type ClefTransport } from './clef.js';
+import { parseSystemOneAnswer, buildSystemOneRequest, type ClefTransport } from './clef.js';
 
 export const JEV_CHOICE_PATH = '/v1/choice';
 
 export interface JevConfig {
-  /** Recorded dataset cloud consent reference; absent means disabled. */
-  consentReference?: string;
+  /**
+   * Authorised dataset/subset boundary: which dataset and split the consent
+   * covers. A bare reference string is not a consent boundary.
+   */
+  consentScope?: { datasetId: string; subset: string; recordedAt: string };
   /** Explicitly configured endpoint; never guessed. */
   endpoint?: string;
+  /**
+   * Set only when a verified Jev API contract (request/response shapes,
+   * authentication, dataset-scoped consent) has been recorded. Absent means
+   * the provider reports deferred, whatever else is configured.
+   */
+  verifiedContract?: { contractRevision: string; verifiedAt: string };
 }
 
 export interface JevDeps {
@@ -44,11 +58,27 @@ export class JevProvider implements DecisionProvider {
     this.deadlineMs = deps.deadlineMs ?? 120_000;
   }
 
+  /**
+   * The deferral that answers every call until a verified contract exists.
+   * This is the honest state of the adapter today (spec review R14).
+   */
+  private deferred(): Result<never> {
+    return err(
+      'UNAUTHORISED',
+      'Jev is deferred: no verified provider API contract, authentication or ' +
+        'dataset-scoped consent boundary is recorded for this application; ' +
+        'the adapter stays disabled rather than assuming an API shape',
+    );
+  }
+
   private guard(): Result<{ url: string; transport: ClefTransport }> {
-    if (this.config.consentReference === undefined) {
+    if (this.config.verifiedContract === undefined) {
+      return this.deferred();
+    }
+    if (this.config.consentScope === undefined) {
       return err(
         'UNAUTHORISED',
-        'Jev requires explicit dataset cloud consent; none recorded, adapter disabled',
+        'Jev requires an authorised dataset/subset consent scope; none recorded, adapter disabled',
       );
     }
     if (this.config.endpoint === undefined || this.transport === undefined) {
@@ -57,11 +87,12 @@ export class JevProvider implements DecisionProvider {
         'Jev endpoint/transport not explicitly configured; disabled rather than guessed',
       );
     }
-    const endpointCheck = assertLoopbackEndpoint(this.config.endpoint);
-    if (!endpointCheck.ok) {
-      return err('PROVIDER_FAILED', endpointCheck.detail);
-    }
-    return ok({ url: `${this.config.endpoint.replace(/\/+$/, '')}${JEV_CHOICE_PATH}`, transport: this.transport });
+    // A hosted endpoint is legitimate once a verified contract exists; the
+    // local-only guard is not reused for it (spec review R14).
+    return ok({
+      url: `${this.config.endpoint.replace(/\/+$/, '')}${JEV_CHOICE_PATH}`,
+      transport: this.transport,
+    });
   }
 
   async health(): Promise<Result<ProviderManifest>> {

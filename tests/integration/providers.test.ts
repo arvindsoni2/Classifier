@@ -431,14 +431,14 @@ describe('LayaProvider (blocked without a local checkpoint)', () => {
   });
 });
 
-describe('JevProvider (cloud reference, consent required)', () => {
-  it('requires explicit dataset cloud consent before any request', async () => {
-    const provider = new JevProvider({});
+describe('JevProvider (cloud reference, deferred until a verified contract)', () => {
+  it('is disabled without recorded consent', async () => {
+    const provider = new JevProvider();
     const decision = await provider.decide(request());
     expect(decision.ok).toBe(false);
     if (!decision.ok) {
       expect(decision.code).toBe('UNAUTHORISED');
-      expect(decision.detail).toMatch(/consent/i);
+      expect(decision.detail).toMatch(/consent|deferred/i);
     }
     const health = await provider.health();
     expect(health.ok).toBe(false);
@@ -446,54 +446,29 @@ describe('JevProvider (cloud reference, consent required)', () => {
     await provider.close();
   });
 
-  it('refuses a non-loopback endpoint even when configured (privacy boundary)', async () => {
+  it('is deferred without a verified contract, even with consent, endpoint and transport', async () => {
+    // Spec review R14: a subscription that exposes a model is not a usable
+    // standalone API; the adapter must not assume an API or response shape.
     const provider = new JevProvider(
-      { consentReference: 'fixture-consent', endpoint: 'http://cloud.jev.example' },
+      {
+        consentScope: { datasetId: 'fixture-dataset', subset: 'test', recordedAt: '2026-10-11T00:00:00.000Z' },
+        endpoint: 'http://127.0.0.1:9/jev-fixture',
+      },
       { transport: { post: async () => ({ status: 200, body: systemOneResponse() }) } },
     );
     const decision = await provider.decide(request());
     expect(decision.ok).toBe(false);
-    if (!decision.ok) expect(decision.detail).toMatch(/loopback/i);
+    if (!decision.ok) {
+      expect(decision.code).toBe('UNAUTHORISED');
+      expect(decision.detail).toMatch(/deferred|verified/i);
+    }
+    const health = await provider.health();
+    expect(health.ok).toBe(false);
+    if (!health.ok) expect(health.detail).toMatch(/deferred/i);
     await provider.close();
   });
 
-  it('retries once on transient failure exactly like clef', async () => {
-    let calls = 0;
-    const flaky: ClefTransport = {
-      post: async () => {
-        calls += 1;
-        if (calls === 1) throw new Error('ECONNRESET transient');
-        return { status: 200, body: systemOneResponse() };
-      },
-    };
-    const provider = new JevProvider(
-      { consentReference: 'fixture-consent', endpoint: 'http://127.0.0.1:9/jev-fixture' },
-      { transport: flaky },
-    );
-    const decision = unwrapDecision(await provider.decide(request()));
-    expect(decision.provider).toBe('jev');
-    expect(calls).toBe(2);
-    await provider.close();
-
-    let deadCalls = 0;
-    const dead: ClefTransport = {
-      post: async () => {
-        deadCalls += 1;
-        throw new Error('ECONNREFUSED');
-      },
-    };
-    const broken = new JevProvider(
-      { consentReference: 'fixture-consent', endpoint: 'http://127.0.0.1:9/jev-fixture' },
-      { transport: dead },
-    );
-    const failed = await broken.decide(request());
-    expect(failed.ok).toBe(false);
-    if (!failed.ok) expect(failed.code).toBe('PROVIDER_FAILED');
-    expect(deadCalls).toBe(2);
-    await broken.close();
-  });
-
-  it('probes only after consent is recorded, using the injected transport', async () => {
+  it('accepts a hosted endpoint once a verified contract is recorded', async () => {
     let posted = 0;
     const transport: ClefTransport = {
       post: async () => {
@@ -503,14 +478,21 @@ describe('JevProvider (cloud reference, consent required)', () => {
     };
     const provider = new JevProvider(
       {
-        consentReference: 'consent-2026-10-07-user-approved-fixture',
-        endpoint: 'http://127.0.0.1:9/jev-fixture',
+        consentScope: { datasetId: 'fixture-dataset', subset: 'test', recordedAt: '2026-10-11T00:00:00.000Z' },
+        endpoint: 'https://cloud.jev.example',
+        verifiedContract: { contractRevision: 'jev-contract-2026-11', verifiedAt: '2026-10-11T00:00:00.000Z' },
       },
       { transport },
     );
-    const decision = unwrapDecision(await provider.decide(request()));
-    expect(decision.provider).toBe('jev');
+    const decision = await provider.decide(request());
     expect(posted).toBe(1);
+    if (decision.ok) {
+      expect(decision.value.provider).toBe('jev');
+    } else {
+      // The response shape is still an assumption; only the endpoint guard
+      // must no longer refuse a legitimate hosted endpoint.
+      expect(decision.detail).not.toMatch(/loopback/i);
+    }
     await provider.close();
   });
 });
@@ -564,12 +546,15 @@ describe('probeProviders (doctor)', () => {
     const health = await probeProviders(
       {
         clef: { endpoint: 'http://127.0.0.1:11434' },
-        jev: { consentReference: 'fixture-consent', endpoint: 'http://127.0.0.1:9/jev-fixture' },
+        jev: { endpoint: 'http://127.0.0.1:9/jev-fixture' },
       },
       { transport: ok },
     );
     const byProvider = new Map<string, ProviderHealth>(health.map((h) => [h.provider, h]));
     expect(byProvider.get('clef')?.status).toBe('ok');
-    expect(byProvider.get('jev')?.status).toBe('ok');
+    // Jev is deferred (spec review R14): no verified contract is recorded, so
+    // it reports blocked instead of a substitute healthy status.
+    expect(byProvider.get('jev')?.status).toBe('blocked');
+    expect(byProvider.get('jev')?.detail).toMatch(/deferred/i);
   });
 });

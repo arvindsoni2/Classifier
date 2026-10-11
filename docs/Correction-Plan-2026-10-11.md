@@ -156,9 +156,17 @@ it (read-only scan recorded; taxonomy handoff pending).
   handle missing/changed inputs per item; export selected real batches with
   consent-aware redaction; retention preserves active journals; scan
   continuation beyond page zero.
-- [ ] **R14** Jev stays explicitly disabled/deferred (no transport invented;
+- [x] **R14** Jev stays explicitly disabled/deferred (no transport invented;
   no local-only guard reused for a hosted endpoint); consent recorded as an
   authorised dataset/subset boundary when it is ever real.
+  Fixed: `JevConfig` now carries a dataset-scoped `consentScope`
+  (datasetId/subset/recordedAt) and an explicit `verifiedContract` record;
+  without a verified contract every call answers UNAUTHORISED with the
+  deferral reason, so no API or response shape is assumed and cloud access is
+  never widened by configuration alone. The loopback guard is no longer reused
+  for the hosted endpoint: once a verified contract is recorded a non-loopback
+  endpoint is legitimate. The doctor reports jev as blocked/deferred with the
+  reason; the config-shaped path (consentReference string) is gone.
 
 ## Phase 5 — release proof (review step 5)
 

@@ -17,7 +17,7 @@ export interface ProviderConfig {
   /** Bundle directory for the pinned @receptron/laya ONNX runtime. */
   laya?: { modelDir?: string };
   clef?: { endpoint?: string };
-  jev?: { consentReference?: string; endpoint?: string };
+  jev?: { consentScope?: { datasetId: string; subset: string; recordedAt: string }; endpoint?: string; verifiedContract?: { contractRevision: string; verifiedAt: string } };
 }
 
 export interface ProviderHealth {

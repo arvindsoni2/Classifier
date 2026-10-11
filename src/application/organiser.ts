@@ -89,7 +89,10 @@ export function createProviders(config: ProviderConfig = {}, helperBinary?: stri
   if (config.laya !== undefined) {
     providers.push(new LayaProvider(config.laya));
   }
-  if (config.jev?.consentReference !== undefined && config.jev.endpoint !== undefined) {
+  if (config.jev !== undefined) {
+    // Jev stays deferred without a verified contract (spec review R14): the
+    // configuration carries a dataset-scoped consent boundary and an explicit
+    // verified-contract record, never a bare reference string.
     providers.push(new JevProvider(config.jev));
   }
   void helperBinary;
