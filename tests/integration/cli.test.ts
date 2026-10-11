@@ -1,4 +1,5 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import { runCli } from '../../src/cli/main.js';
@@ -15,7 +16,7 @@ afterAll(() => {
 });
 
 function world(label: string, files: Record<string, string> = { 'invoice-01.txt': 'first invoice\n', 'invoice-02.txt': 'second invoice\n' }) {
-  const dir = mkdtempSync(join('/tmp/opencode', `cli-${label}-`));
+  const dir = mkdtempSync(join(tmpdir(), `cli-${label}-`));
   fixtures.push(dir);
   const rootDir = join(dir, 'Downloads');
   mkdirSync(join(rootDir, 'Invoices'), { recursive: true });

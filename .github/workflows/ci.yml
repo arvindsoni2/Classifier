@@ -1,0 +1,38 @@
+# Reproducible check pipeline (spec review R15): the supported Node runtime on
+# Linux, with the native helper and the browser installed for their suites.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+      - uses: pnpm/action-setup-v4
+        with:
+          version: 9
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Build
+        run: pnpm build
+      - name: Typecheck (application + UI)
+        run: pnpm typecheck
+      - name: Lint
+        run: pnpm lint
+      - name: Unit and integration tests
+        run: pnpm test
+      - name: Rust toolchain
+        run: rustup default stable
+      - name: Native helper tests
+        run: pnpm test:native
+      - name: Playwright browsers
+        run: pnpm exec playwright install --with-deps chromium
+      - name: End-to-end review flow
+        run: pnpm test:e2e

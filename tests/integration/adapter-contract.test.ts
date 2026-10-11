@@ -1,4 +1,5 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import type { DecisionProvider, Item } from '../../src/domain/contracts.js';
@@ -140,7 +141,7 @@ describe('collection source adapter contract (FR-14)', () => {
     if (!result.ok) expect(result.code).toBe('UNSUPPORTED');
 
     // A directory tree next to it is untouched: no helper process exists.
-    const dir = mkdtempSync(join('/tmp/opencode', 'adapter-contract-'));
+    const dir = mkdtempSync(join(tmpdir(), 'adapter-contract-'));
     fixtures.push(dir);
     mkdirSync(join(dir, 'Invoices'), { recursive: true });
     writeFileSync(join(dir, 'Invoices', 'invoice.txt'), 'precious\n', 'utf8');

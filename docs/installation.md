@@ -67,9 +67,21 @@ pnpm run doctor       # per-provider health
 
 ## First setup
 
+The CLI takes the scan path as its first argument (or `ORGANISER_ROOT`); it
+has no `--root` flag, and `tsx` is not a dependency:
+
 ```sh
-pnpm --dir . exec tsx src/cli/main.ts scan --root /path/to/Downloads  # or via the UI
+pnpm build
+ORGANISER_ROOT="$HOME/Downloads" node dist/cli/main.js scan   # read-only
+ORGANISER_ROOT="$HOME/Downloads" node dist/cli/main.js taxonomy --review
+ORGANISER_ROOT="$HOME/Downloads" node dist/cli/main.js classify --provider rules
+ORGANISER_ROOT="$HOME/Downloads" node dist/cli/main.js review --list
 ```
+
+Classification requires a reviewed taxonomy (`taxonomy --review`, or the
+Taxonomy tab in the UI). `pnpm typecheck` covers the application and the UI,
+`pnpm test` the unit/integration suites, `pnpm test:native` the helper, and
+`pnpm test:e2e` the review flow.
 
 Run `organiser review` and use the one-time bootstrap token printed on the
 terminal in the login form. Approval of a concrete batch happens inside the

@@ -18,6 +18,7 @@ import {
   truncateSync,
   writeFileSync,
 } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 export interface FixtureRoot {
@@ -29,7 +30,7 @@ export interface FixtureRoot {
 }
 
 export function makeFixtureRoot(label: string): FixtureRoot {
-  const parent = mkdtempSync(join('/tmp/opencode', `discovery-${label}-`));
+  const parent = mkdtempSync(join(tmpdir(), `discovery-${label}-`));
   const root = join(parent, 'Downloads');
   mkdirSync(root);
   return {

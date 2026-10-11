@@ -1,4 +1,5 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 /**
@@ -26,7 +27,7 @@ export async function startWorld(files: Record<string, string> = {
   'resume.pdf': 'resume draft content\n',
   '$(touch marker).txt': 'shell-like name is data\n',
 }, directories: string[] = ['Invoices', 'Media', 'Documents']): Promise<E2EWorld> {
-  const dir = mkdtempSync(join('/tmp/opencode', 'e2e-world-'));
+  const dir = mkdtempSync(join(tmpdir(), 'e2e-world-'));
   const rootDir = join(dir, 'Downloads');
   mkdirSync(rootDir, { recursive: true });
   for (const name of directories) mkdirSync(join(rootDir, name), { recursive: true });

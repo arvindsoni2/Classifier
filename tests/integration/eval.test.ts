@@ -1,4 +1,5 @@
 import { appendFileSync, cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';import type { Decision, DecisionProvider, DecisionRequest, ProviderManifest, Result } from '../../src/domain/contracts.js';
 import { loadDataset, loadLabels } from '../../src/eval/dataset.js';
@@ -55,7 +56,7 @@ describe('loadDataset + runEvaluation on the synthetic fixture', () => {
   });
 
   it('rejects a tampered manifest hash and duplicate item IDs as Result errors', () => {
-    const tampered = mkdtempSync(join('/tmp/opencode', 'eval-tamper-'));
+    const tampered = mkdtempSync(join(tmpdir(), 'eval-tamper-'));
     outDirs.push(tampered);
     cpSync(FIXTURE, tampered, { recursive: true });
     writeFileSync(
@@ -69,7 +70,7 @@ describe('loadDataset + runEvaluation on the synthetic fixture', () => {
       expect(dataset.detail).toMatch(/hash|mismatch/i);
     }
 
-    const dupes = mkdtempSync(join('/tmp/opencode', 'eval-dupes-'));
+    const dupes = mkdtempSync(join(tmpdir(), 'eval-dupes-'));
     outDirs.push(dupes);
     cpSync(FIXTURE, dupes, { recursive: true });
     const firstLine = readFileSync(join(dupes, 'items.jsonl'), 'utf8').split('\n')[0] ?? '';
@@ -206,7 +207,7 @@ describe('exports and scoring', () => {
     });
     expect(calibrated.nodePredictions.length).toBeGreaterThan(0);
 
-    const outDir = mkdtempSync(join('/tmp/opencode', 'eval-export-'));
+    const outDir = mkdtempSync(join(tmpdir(), 'eval-export-'));
     outDirs.push(outDir);
     const exported = await exportRun(calibrated, dataset.value, labels.value, { outDir });
     expect(exported.ok).toBe(true);
@@ -224,7 +225,7 @@ describe('exports and scoring', () => {
     expect(manifest.synthetic).toBe(true);
 
     // The opt-in path writes a clearly named private file — and only then.
-    const optInDir = mkdtempSync(join('/tmp/opencode', 'eval-export-private-'));
+    const optInDir = mkdtempSync(join(tmpdir(), 'eval-export-private-'));
     outDirs.push(optInDir);
     const privateExport = await exportRun(calibrated, dataset.value, labels.value, {
       outDir: optInDir,

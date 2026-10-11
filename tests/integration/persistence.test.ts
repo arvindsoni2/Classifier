@@ -1,4 +1,5 @@
 import { mkdtempSync, rmSync, statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import { afterAll, describe, expect, it } from 'vitest';
@@ -7,7 +8,7 @@ import { createRepositories } from '../../src/adapters/persistence/repositories.
 
 // Synthetic fixture storage only (AGENTS.md rule 12): never the real
 // Downloads directory or a real organisation root.
-const tmpDir = mkdtempSync(join('/tmp/opencode', 'persistence-'));
+const tmpDir = mkdtempSync(join(tmpdir(), 'persistence-'));
 const dbPath = join(tmpDir, 'organiser.sqlite');
 const repos = createRepositories(dbPath);
 
@@ -22,7 +23,7 @@ const hugeInode = '9999999999999999999999999999999456';
 
 const root = {
   id: 'root-1',
-  canonicalPath: '/tmp/opencode/fixture-downloads',
+  canonicalPath: 'synthetic-fixture-downloads',
   device: '65026',
   inode: '998877665544332211',
   policyRevision: 1,
