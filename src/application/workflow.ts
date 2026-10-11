@@ -27,6 +27,7 @@ import { createApproval as createApprovalCore, validateApproval } from '../domai
 import type { Repositories } from '../adapters/persistence/repositories.js';
 import type { FilesystemHealth } from '../adapters/filesystem/helper.js';
 import { reconcileAction } from './recovery.js';
+import type { LocationObservations, ReconcileRecord } from './recovery.js';
 
 /** Points where a simulated process death may be injected (tests). */
 export type FaultPoint =
@@ -34,7 +35,14 @@ export type FaultPoint =
   | 'after-intent'
   | 'after-rename'
   | 'after-verify'
-  | 'before-applied-commit';
+  | 'before-applied-commit'
+  // Undo boundaries (spec review R5/R15): an interrupted undo must be as
+  // testable and recoverable as an interrupted apply.
+  | 'before-undo-intent'
+  | 'after-undo-intent'
+  | 'after-undo-rename'
+  | 'after-undo-verify'
+  | 'before-undone-commit';
 
 export interface HelperPort {
   probe(root: RootConfig): Promise<Result<FilesystemHealth>>;
@@ -98,6 +106,32 @@ export interface BatchResult {
 }
 
 const TERMINAL_STATES = new Set(['applied', 'conflict', 'stale', 'canceled', 'undone']);
+
+/**
+ * Helper failures that definitely mean "nothing happened" (the helper
+ * verifies before any effect). Everything else — transport failures,
+ * timeouts, post-effect fsync errors — is uncertain and must be reconciled
+ * against reality rather than committed as a terminal conflict.
+ */
+const DEFINITE_REFUSALS = new Set([
+  'COLLISION',
+  'OUT_OF_SCOPE',
+  'OVERSIZE',
+  'CROSS_MOUNT',
+  'STALE',
+  'INVALID_DECISION',
+  'UNSUPPORTED',
+  'UNAUTHORISED',
+]);
+
+function isDefiniteRefusal(failure: { code: string }): boolean {
+  return DEFINITE_REFUSALS.has(failure.code);
+}
+
+/** A missing location is the only reading that means "absent". */
+function isDefiniteAbsence(failure: { code: string }): boolean {
+  return failure.code === 'OUT_OF_SCOPE';
+}
 
 /**
  * Root/destination identity captured when an approval was created (spec
@@ -402,6 +436,271 @@ export class ApplicationService {
   }
 
   /**
+   * Resolves a cancellation request against reality (spec review R5): if the
+   * effect already happened the record is committed as applied/undone — a
+   * cancellation never erases an effect — and only a not-yet-effected action
+   * is marked canceled.
+   */
+  private async resolveForCancellation(
+    batch: { id: Id; rootId: Id },
+    record: { id: Id; proposalId: Id; approvalId: Id; mode: 'apply' | 'undo'; proposalVersion: Revision },
+  ): Promise<ActionResult> {
+    const proposal = this.repositories.proposals.get(record.proposalId);
+    const root = proposal === null ? null : this.rootConfigFor(batch.rootId);
+    const destination = proposal === null ? undefined : this.destinations.get(proposal.destinationId);
+    if (proposal === null || root === null || destination === undefined) {
+      this.repositories.actions.update(record.id, { state: 'canceled' });
+      return {
+        actionId: record.id,
+        proposalId: record.proposalId,
+        outcome: 'canceled',
+        detail: 'cancellation was requested and the action cannot be resolved against the catalogue',
+      };
+    }
+    const expected =
+      record.mode === 'apply'
+        ? proposal.expected
+        : (this.appliedAfter({ proposalId: record.proposalId, proposalVersion: record.proposalVersion }) ?? proposal.expected);
+    const observed = await this.observe(root, proposal.basename, destination.segments);
+    if (!observed.ok) {
+      this.repositories.actions.update(record.id, { state: 'canceled' });
+      return {
+        actionId: record.id,
+        proposalId: record.proposalId,
+        outcome: 'canceled',
+        detail: `cancellation was requested; ${observed.detail}`,
+      };
+    }
+    // approvalValid false: cancellation never re-runs an effect.
+    const outcome = reconcileAction(
+      this.reconcileRecord(record, proposal, destination, expected, false),
+      observed.value,
+    );
+    if (outcome.ok && outcome.value.kind === 'applied') {
+      return this.commitReconciledEffect(record, proposal, destination, outcome.value.after);
+    }
+    this.repositories.actions.update(record.id, { state: 'canceled' });
+    return {
+      actionId: record.id,
+      proposalId: record.proposalId,
+      outcome: 'canceled',
+      detail: outcome.ok
+        ? `cancellation was requested and no effect had occurred (${outcome.value.reason})`
+        : `cancellation was requested and the locations could not be resolved (${outcome.detail})`,
+    };
+  }
+
+  /** The verified "after" snapshot of a completed forward move. */
+  private appliedAfter(record: { proposalId: Id; proposalVersion: Revision }): Snapshot | null {
+    const applyAction = this.repositories.actions.find(record.proposalId, record.proposalVersion, 'apply');
+    if (applyAction === null || applyAction.receiptJson === null) return null;
+    try {
+      const receipt = JSON.parse(applyAction.receiptJson) as MoveReceipt;
+      return receipt.after ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  private reconcileRecord(
+    record: { id: Id; proposalId: Id; approvalId: Id; mode: 'apply' | 'undo' },
+    proposal: Proposal,
+    destination: Destination,
+    expected: Snapshot,
+    approvalValid: boolean,
+  ): ReconcileRecord {
+    return {
+      actionId: record.id,
+      proposalId: record.proposalId,
+      proposalVersion: proposal.version,
+      mode: 'apply',
+      approvalId: record.approvalId,
+      state: 'intent',
+      expected,
+      sourceBasename: proposal.basename,
+      targetSegments: destination.segments,
+      approvalValid,
+    };
+  }
+
+  /** Commits a reconciled effect (apply: moved; undo: returned) with a receipt. */
+  private commitReconciledEffect(
+    record: { id: Id; proposalId: Id; mode: 'apply' | 'undo' },
+    proposal: Proposal,
+    destination: Destination,
+    after: Snapshot,
+  ): ActionResult {
+    const undone = record.mode === 'undo';
+    const receipt: MoveReceipt = {
+      kind: 'move_file',
+      actionId: record.id,
+      requestId: this.requestIdFn(),
+      outcome: 'moved',
+      before: undone
+        ? (this.appliedAfter({ proposalId: record.proposalId, proposalVersion: proposal.version }) ?? proposal.expected)
+        : proposal.expected,
+      after,
+      createdDirectoryIds: [],
+      verified: true,
+    };
+    this.repositories.transaction(() => {
+      this.repositories.actions.update(record.id, {
+        state: undone ? 'undone' : 'applied',
+        receiptJson: JSON.stringify(receipt),
+      });
+      this.repositories.actions.appendEvent(record.id, {
+        event: undone ? 'undone' : 'applied',
+        recordedAt: this.clock().toISOString(),
+        payloadJson: JSON.stringify({ verified: true, reconciled: true }),
+      });
+    });
+    return {
+      actionId: record.id,
+      proposalId: record.proposalId,
+      outcome: undone ? 'undone' : 'applied',
+      receipt,
+      detail: undone
+        ? 'reconciled: the file is back at its original location'
+        : 'reconciled: the move took effect; the receipt was rebuilt from observations',
+    };
+  }
+
+  /**
+   * Reconciles an interrupted undo (spec review R5): the reverse intent is
+   * resolved against immutable observations before any retry.
+   */
+  private async resumeUndoAction(
+    batch: { id: Id; rootId: Id },
+    existing: { id: Id; proposalId: Id; approvalId: Id },
+  ): Promise<ActionResult> {
+    const proposal = this.repositories.proposals.get(existing.proposalId);
+    if (proposal === null) {
+      return { actionId: existing.id, proposalId: existing.proposalId, outcome: 'stale', detail: 'proposal vanished' };
+    }
+    const root = this.rootConfigFor(batch.rootId);
+    if (root === null) {
+      return { actionId: existing.id, proposalId: existing.proposalId, outcome: 'conflict', detail: 'root record is unavailable' };
+    }
+    const destination = this.destinations.get(proposal.destinationId);
+    if (destination === undefined) {
+      return {
+        actionId: existing.id,
+        proposalId: existing.proposalId,
+        outcome: 'conflict',
+        detail: 'destination absent from the catalogue',
+      };
+    }
+    const expected = this.appliedAfter({ proposalId: existing.proposalId, proposalVersion: proposal.version }) ?? proposal.expected;
+    const observed = await this.observe(root, proposal.basename, destination.segments);
+    if (!observed.ok) {
+      return { actionId: existing.id, proposalId: existing.proposalId, outcome: 'conflict', detail: observed.detail };
+    }
+    // Swap the roles: the undo's effect location is the original inbox name.
+    const swapped = { source: observed.value.target, target: observed.value.source };
+    const outcome = reconcileAction(
+      this.reconcileRecord(
+        { id: existing.id, proposalId: existing.proposalId, approvalId: existing.approvalId, mode: 'undo' },
+        proposal,
+        destination,
+        expected,
+        this.approvalValid(existing.approvalId),
+      ),
+      swapped,
+    );
+    if (!outcome.ok) {
+      return { actionId: existing.id, proposalId: existing.proposalId, outcome: 'conflict', detail: outcome.detail };
+    }
+    switch (outcome.value.kind) {
+      case 'applied':
+        return this.commitReconciledEffect(
+          { id: existing.id, proposalId: existing.proposalId, mode: 'undo' },
+          proposal,
+          destination,
+          outcome.value.after,
+        );
+      case 'retry':
+        return this.retryUndo({ id: batch.id, rootId: batch.rootId }, existing, proposal, destination, expected);
+      case 'stale':
+        this.repositories.actions.update(existing.id, { state: 'stale' });
+        return { actionId: existing.id, proposalId: existing.proposalId, outcome: 'stale', detail: outcome.value.reason };
+      default:
+        this.repositories.actions.update(existing.id, { state: 'conflict' });
+        return { actionId: existing.id, proposalId: existing.proposalId, outcome: 'conflict', detail: outcome.value.reason };
+    }
+  }
+
+  /** Re-runs an approved reverse move whose effect never happened. */
+  private async retryUndo(
+    batch: { id: Id; rootId: Id },
+    existing: { id: Id; proposalId: Id; approvalId: Id },
+    proposal: Proposal,
+    destination: Destination,
+    expected: Snapshot,
+  ): Promise<ActionResult> {
+    const root = this.rootConfigFor(batch.rootId);
+    if (root === null) {
+      return { actionId: existing.id, proposalId: existing.proposalId, outcome: 'conflict', detail: 'root record is unavailable' };
+    }
+    this.repositories.actions.update(existing.id, { state: 'undo_intent' });
+    const result = await this.helper.undoAt(
+      {
+        actionId: existing.id,
+        approvalId: existing.approvalId,
+        basename: proposal.basename,
+        targetSegments: destination.segments,
+        expected,
+      },
+      root,
+    );
+    if (!result.ok) {
+      // An uncertain failure is not a terminal conflict (spec review R5):
+      // the record stays non-terminal so a later resume reconciles it.
+      if (!isDefiniteRefusal(result)) {
+        this.repositories.actions.appendEvent(existing.id, {
+          event: 'uncertain_effect',
+          recordedAt: this.clock().toISOString(),
+          payloadJson: JSON.stringify({ code: result.code, detail: result.detail }),
+        });
+        return { actionId: existing.id, proposalId: existing.proposalId, outcome: 'conflict', detail: `${result.code}: ${result.detail}; effect uncertain, reconciliation required` };
+      }
+      this.repositories.transaction(() => {
+        this.repositories.actions.update(existing.id, { state: 'conflict' });
+        this.repositories.actions.appendEvent(existing.id, {
+          event: 'conflict',
+          recordedAt: this.clock().toISOString(),
+          payloadJson: JSON.stringify({ code: result.code, detail: result.detail }),
+        });
+      });
+      return { actionId: existing.id, proposalId: existing.proposalId, outcome: 'conflict', detail: `${result.code}: ${result.detail}` };
+    }
+    if (result.value.outcome === 'conflict') {
+      this.repositories.transaction(() => {
+        this.repositories.actions.update(existing.id, { state: 'conflict', receiptJson: JSON.stringify(result.value) });
+        this.repositories.actions.appendEvent(existing.id, {
+          event: 'conflict',
+          recordedAt: this.clock().toISOString(),
+        });
+      });
+      return { actionId: existing.id, proposalId: existing.proposalId, outcome: 'conflict', detail: 'the reverse move ended in conflict; material preserved' };
+    }
+    this.repositories.transaction(() => {
+      this.repositories.actions.update(existing.id, { state: 'undone', receiptJson: JSON.stringify(result.value) });
+      this.repositories.actions.appendEvent(existing.id, {
+        event: 'undone',
+        recordedAt: this.clock().toISOString(),
+        payloadJson: JSON.stringify({ verified: result.value.verified }),
+      });
+    });
+    return {
+      actionId: existing.id,
+      proposalId: existing.proposalId,
+      outcome: 'undone',
+      receipt: result.value,
+      detail: 'the approved reverse move completed after reconciliation',
+    };
+  }
+
+  /**
    * Runs one approved action: claim → intent → helper → verified commit.
    * Every step is journalled; fault points simulate process death.
    */
@@ -682,16 +981,28 @@ export class ApplicationService {
   }
 
   /** Reads both locations through the helper; never by direct fs access. */
+  /**
+   * Observes both locations with typed outcomes (spec review R5). A failed
+   * inspection is `unobservable`, never silently `absent`.
+   */
   private async observe(
     root: RootConfig,
     basename: string,
     targetSegments: readonly string[],
-  ): Promise<Result<{ source: { exists: boolean; snapshot: Snapshot | null }; target: { exists: boolean; snapshot: Snapshot | null } }>> {
+  ): Promise<Result<LocationObservations>> {
     const source = await this.helper.inspectAt(root, [basename]);
     const target = await this.helper.inspectAt(root, [...targetSegments, basename]);
     return ok({
-      source: source.ok ? { exists: true, snapshot: source.value } : { exists: false, snapshot: null },
-      target: target.ok ? { exists: true, snapshot: target.value } : { exists: false, snapshot: null },
+      source: source.ok
+        ? { kind: 'present', snapshot: source.value }
+        : isDefiniteAbsence(source)
+          ? { kind: 'absent' }
+          : { kind: 'unobservable', detail: `${source.code}: ${source.detail}` },
+      target: target.ok
+        ? { kind: 'present', snapshot: target.value }
+        : isDefiniteAbsence(target)
+          ? { kind: 'absent' }
+          : { kind: 'unobservable', detail: `${target.code}: ${target.detail}` },
     });
   }
 
@@ -726,18 +1037,23 @@ export class ApplicationService {
           if (seen.has(record.id) || TERMINAL_STATES.has(record.state)) continue;
           seen.add(record.id);
           if (batch.cancellationRequested === true) {
-            this.repositories.actions.update(record.id, { state: 'canceled' });
-            results.push({
-              actionId: record.id,
-              proposalId: record.proposalId,
-              outcome: 'canceled',
-              detail: 'cancellation was requested before this action',
-            });
+            // Cancellation never erases an effect: the record is resolved
+            // against reality first, and only a not-yet-effected action is
+            // marked canceled (spec review R5).
+            const resolved = await this.resolveForCancellation({ id: batch.id, rootId: batch.rootId }, record);
+            results.push(resolved);
             continue;
           }
           if (record.mode === 'apply') {
             results.push(
               await this.resumeApplyAction(
+                { id: batch.id, rootId: batch.rootId },
+                { id: record.id, proposalId: record.proposalId, approvalId: record.approvalId },
+              ),
+            );
+          } else {
+            results.push(
+              await this.resumeUndoAction(
                 { id: batch.id, rootId: batch.rootId },
                 { id: record.id, proposalId: record.proposalId, approvalId: record.approvalId },
               ),
@@ -814,7 +1130,21 @@ export class ApplicationService {
       if (undoAction !== null && undoAction.state === 'undone' && undoAction.receiptJson !== null) {
         return ok(JSON.parse(undoAction.receiptJson) as MoveReceipt);
       }
+      // An existing non-terminal intent is reconciled against reality before
+      // any retry (spec review R5): a previous attempt may already have moved
+      // the file, and blind re-invocation could double-reverse it.
+      if (undoAction !== null && !TERMINAL_STATES.has(undoAction.state)) {
+        const reconciled = await this.resumeUndoAction({ id: batch.id, rootId: batch.rootId }, {
+          id: undoAction.id,
+          proposalId: undoAction.proposalId,
+          approvalId: undoApprovalId,
+        });
+        if (reconciled.outcome === 'undone' && reconciled.receipt !== undefined) {
+          return ok(reconciled.receipt);
+        }
+      }
       const undoActionId = undoAction?.id ?? `action-${randomUUID()}`;
+      this.faultHook?.('before-undo-intent', { actionId: undoActionId, proposalId: action.proposalId });
       this.repositories.transaction(() => {
         if (undoAction === null) {
           this.repositories.actions.save({
@@ -835,6 +1165,7 @@ export class ApplicationService {
         });
       });
 
+      this.faultHook?.('after-undo-intent', { actionId: undoActionId, proposalId: action.proposalId });
       const result = await this.helper.undoAt(
         {
           actionId: undoActionId,
@@ -845,17 +1176,30 @@ export class ApplicationService {
         },
         root,
       );
+      this.faultHook?.('after-undo-rename', { actionId: undoActionId, proposalId: action.proposalId });
       if (!result.ok) {
-        this.repositories.transaction(() => {
-          this.repositories.actions.update(undoActionId, { state: 'conflict' });
-          this.repositories.actions.appendEvent(undoActionId, {
-            event: 'conflict',
-            recordedAt: this.clock().toISOString(),
-            payloadJson: JSON.stringify({ code: result.code, detail: result.detail }),
+        // A definite refusal is terminal; an uncertain failure (timeout,
+        // transport, post-effect fsync) keeps the record non-terminal so a
+        // later resume reconciles it (spec review R5).
+        if (isDefiniteRefusal(result)) {
+          this.repositories.transaction(() => {
+            this.repositories.actions.update(undoActionId, { state: 'conflict' });
+            this.repositories.actions.appendEvent(undoActionId, {
+              event: 'conflict',
+              recordedAt: this.clock().toISOString(),
+              payloadJson: JSON.stringify({ code: result.code, detail: result.detail }),
+            });
           });
+          return result;
+        }
+        this.repositories.actions.appendEvent(undoActionId, {
+          event: 'uncertain_effect',
+          recordedAt: this.clock().toISOString(),
+          payloadJson: JSON.stringify({ code: result.code, detail: result.detail }),
         });
-        return result;
+        return err('CONFLICT', `${result.code}: ${result.detail}; effect uncertain, reconciliation required`);
       }
+      this.faultHook?.('after-undo-verify', { actionId: undoActionId, proposalId: action.proposalId });
       if (result.value.outcome === 'conflict') {
         this.repositories.transaction(() => {
           this.repositories.actions.update(undoActionId, { state: 'conflict', receiptJson: JSON.stringify(result.value) });
@@ -866,6 +1210,7 @@ export class ApplicationService {
         });
         return err('CONFLICT', 'the reverse move ended in conflict; material preserved');
       }
+      this.faultHook?.('before-undone-commit', { actionId: undoActionId, proposalId: action.proposalId });
       this.repositories.transaction(() => {
         this.repositories.actions.update(undoActionId, { state: 'undone', receiptJson: JSON.stringify(result.value) });
         this.repositories.actions.appendEvent(undoActionId, {

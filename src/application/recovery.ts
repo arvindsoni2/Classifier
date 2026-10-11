@@ -24,10 +24,16 @@ export interface ReconcileRecord {
   approvalValid: boolean;
 }
 
-export interface LocationObservation {
-  exists: boolean;
-  snapshot: Snapshot | null;
-}
+/**
+ * A location observation (spec review R5). `unobservable` is distinct from
+ * `absent`: a permission failure, an unsupported operation or a symlink/type
+ * error must never be read as "the file is not there" — reconciliation then
+ * preserves material instead of acting on a false absent.
+ */
+export type LocationObservation =
+  | { kind: 'present'; snapshot: Snapshot }
+  | { kind: 'absent' }
+  | { kind: 'unobservable'; detail: string };
 
 export interface LocationObservations {
   source: LocationObservation;
@@ -55,6 +61,11 @@ export function matchesExpected(
   );
 }
 
+/** Reads an observation as "the expected file is here". */
+function holdsExpected(observation: LocationObservation, expected: Snapshot): boolean {
+  return observation.kind === 'present' && matchesExpected(expected, observation.snapshot);
+}
+
 /**
  * Decides what an interrupted action means:
  * - expected file only at source, approval still valid → the move never
@@ -68,13 +79,30 @@ export function reconcileAction(
   record: ReconcileRecord,
   observations: LocationObservations,
 ): { ok: true; value: ReconcileOutcome } | { ok: false; code: 'CONFLICT'; detail: string } {
-  const atSource = observations.source.exists && matchesExpected(record.expected, observations.source.snapshot);
-  const atTarget = observations.target.exists && matchesExpected(record.expected, observations.target.snapshot);
-  const expectedBytesAtSourceOnly = observations.source.exists && !observations.target.exists && atSource;
-  const expectedBytesAtTargetOnly = !observations.source.exists && observations.target.exists && atTarget;
+  // An unobservable location is a conflict on its own: no decision may be
+  // made from a reading that failed (spec review R5).
+  for (const [name, observation] of [
+    ['source', observations.source],
+    ['target', observations.target],
+  ] as const) {
+    if (observation.kind === 'unobservable') {
+      return {
+        ok: false,
+        code: 'CONFLICT',
+        detail: `the ${name} location is unobservable (${observation.detail}); reconciliation cannot decide the outcome`,
+      };
+    }
+  }
+
+  const atSource = holdsExpected(observations.source, record.expected);
+  const atTarget = holdsExpected(observations.target, record.expected);
+  const sourcePresent = observations.source.kind === 'present';
+  const targetPresent = observations.target.kind === 'present';
+  const expectedBytesAtSourceOnly = sourcePresent && !targetPresent && atSource;
+  const expectedBytesAtTargetOnly = !sourcePresent && targetPresent && atTarget;
 
   if (expectedBytesAtSourceOnly && expectedBytesAtTargetOnly) {
-    // Defensive: unreachable given the exists-conditions above.
+    // Defensive: unreachable given the presence-conditions above.
     return { ok: false, code: 'CONFLICT', detail: 'observations are contradictory' };
   }
 
@@ -99,10 +127,11 @@ export function reconcileAction(
   }
 
   if (expectedBytesAtTargetOnly) {
-    const after = observations.target.snapshot;
-    if (after === null) {
+    const observedTarget = observations.target;
+    if (observedTarget.kind !== 'present') {
       return { ok: false, code: 'CONFLICT', detail: 'target observation has no snapshot' };
     }
+    const after = observedTarget.snapshot;
     return {
       ok: true,
       value: {
@@ -114,10 +143,10 @@ export function reconcileAction(
   }
 
   const reasons: string[] = [];
-  if (observations.source.exists && observations.target.exists) reasons.push('both locations hold a file');
-  if (!observations.source.exists && !observations.target.exists) reasons.push('neither location holds the expected file');
-  if (observations.source.exists && !atSource) reasons.push('the source file does not match the expected snapshot');
-  if (observations.target.exists && !atTarget) reasons.push('the target file does not match the expected snapshot');
+  if (sourcePresent && targetPresent) reasons.push('both locations hold a file');
+  if (!sourcePresent && !targetPresent) reasons.push('neither location holds the expected file');
+  if (sourcePresent && !atSource) reasons.push('the source file does not match the expected snapshot');
+  if (targetPresent && !atTarget) reasons.push('the target file does not match the expected snapshot');
   return {
     ok: true,
     value: {

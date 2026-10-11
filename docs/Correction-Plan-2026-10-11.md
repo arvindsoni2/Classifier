@@ -90,10 +90,22 @@ it (read-only scan recorded; taxonomy handoff pending).
 
 ## Phase 2 — durable execution (review step 2)
 
-- [ ] **R5** Typed observations (present/absent/unobservable); reconcile
+- [x] **R5** Typed observations (present/absent/unobservable); reconcile
   `undo_intent` records in `resumeBatch`; uncertain post-effect results need
   reconciliation instead of terminal `conflict`; cancel only after resolving
   whether an effect already happened.
+  Fixed: `LocationObservation` is now `present | absent | unobservable`
+  (only a definite OUT_OF_SCOPE reading means absent; permissions/unsupported
+  errors conflict instead of being read as absent); `resumeBatch` reconciles
+  interrupted undo intents through `resumeUndoAction` (role-swapped
+  observations, reconcile → commit/retry/stale/conflict); `undoAction`
+  reconciles an existing non-terminal intent before any retry; uncertain
+  helper failures (PROVIDER_FAILED/timeout class) leave the record
+  non-terminal with an `uncertain_effect` event while definite refusals stay
+  terminal; cancellation resolves the effect first and only marks a
+  not-yet-effected action canceled. Undo fault points
+  (before/after-undo-intent, after-undo-rename, after-undo-verify,
+  before-undone-commit) make interrupted undos testable.
 - [ ] **R6** Persist complete immutable action snapshots (source/target
   inodes, expected hashes, pins) and real journal payloads; add a root-scoped
   process lock for apply/recovery/undo; transactional claims. Tests: process

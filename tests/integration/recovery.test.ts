@@ -25,12 +25,16 @@ const expectedSnapshot: Snapshot = {
   sha256: sha256Hex('hello there\n'),
 };
 
-function observation(content: string | null): LocationObservations['source'] {
-  if (content === null) return { exists: false, snapshot: null };
-  return {
-    exists: true,
-    snapshot: { ...expectedSnapshot, sha256: sha256Hex(content) },
-  };
+function observation(content: string | null, detail?: string): LocationObservations['source'] {
+  if (content === null && detail === undefined) return { kind: 'absent' };
+  if (content === null && detail !== undefined) return { kind: 'unobservable', detail };
+  if (content !== null) {
+    return {
+      kind: 'present',
+      snapshot: { ...expectedSnapshot, sha256: sha256Hex(content) },
+    };
+  }
+  return { kind: 'absent' };
 }
 
 function record(overrides: Partial<Parameters<typeof reconcileAction>[0]> = {}) {

@@ -29,9 +29,12 @@ export function sha256Hex(input: string | Buffer): string {
 }
 
 export function snapshotOf(path: string, content: string | Buffer): Snapshot {
+  // Identity is content-derived, like a real inode: it survives a rename, so
+  // reconciliation can recognise a moved file at its new location.
+  void path;
   return {
     device: '65026',
-    inode: sha256Hex(path).slice(0, 12),
+    inode: sha256Hex(content).slice(0, 12),
     size: String(Buffer.byteLength(content)),
     mtimeNs: '1760000000000000000',
     ctimeNs: '1760000000000000000',

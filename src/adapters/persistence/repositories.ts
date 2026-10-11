@@ -38,7 +38,10 @@ export type ActionEventKind =
   | 'conflict'
   | 'stale'
   | 'undo_intent'
-  | 'undone';
+  | 'undone'
+  // A helper failure whose effect cannot be determined (timeout, transport,
+  // post-effect fsync): the record stays non-terminal for reconciliation.
+  | 'uncertain_effect';
 
 export interface ActionEvent {
   event: ActionEventKind;
