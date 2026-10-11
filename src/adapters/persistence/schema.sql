@@ -94,6 +94,12 @@ CREATE TABLE IF NOT EXISTS actions (
   mode TEXT NOT NULL,
   state TEXT NOT NULL,
   receipt_json TEXT,
+  -- Immutable action data (spec review R6): what was promised, captured at
+  -- intent time and never re-read from the mutable proposal or catalogue.
+  source_basename TEXT,
+  target_segments_json TEXT,
+  expected_snapshot_json TEXT,
+  destination_pin_json TEXT,
   UNIQUE(proposal_id, version, mode)
 );
 
@@ -102,7 +108,17 @@ CREATE TABLE IF NOT EXISTS action_events (
   action_id TEXT NOT NULL REFERENCES actions(id),
   event TEXT NOT NULL,
   recorded_at TEXT NOT NULL,
-  payload_hash TEXT NOT NULL
+  payload_hash TEXT NOT NULL,
+  -- The payload itself is retained (R6): a hash alone is not recoverable.
+  payload_json TEXT
+);
+
+-- Root-scoped writer lock (spec review R6): one apply/recovery/undo writer
+-- per root across every process, with stale takeover after a crash.
+CREATE TABLE IF NOT EXISTS writer_locks (
+  root_id TEXT PRIMARY KEY,
+  owner TEXT NOT NULL,
+  acquired_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS overrides (

@@ -107,6 +107,9 @@ export interface BatchResult {
 
 const TERMINAL_STATES = new Set(['applied', 'conflict', 'stale', 'canceled', 'undone']);
 
+/** A lock older than this belongs to a crashed writer and may be taken over. */
+const WRITER_LOCK_STALE_MS = 60_000;
+
 /**
  * Helper failures that definitely mean "nothing happened" (the helper
  * verifies before any effect). Everything else — transport failures,
@@ -141,6 +144,13 @@ function isDefiniteAbsence(failure: { code: string }): boolean {
 export interface ApprovalPins {
   root: { device: string; inode: string };
   destinations: { proposalId: Id; destinationId: Id; device: string; inode: string }[];
+}
+
+/** The approval's pin for one proposal, when present. */
+function pinFor(pins: ApprovalPins, proposalId: Id): { destinationId: Id; device: string; inode: string } | null {
+  const pin = pins.destinations.find((entry) => entry.proposalId === proposalId);
+  if (pin === undefined) return null;
+  return { destinationId: pin.destinationId, device: pin.device, inode: pin.inode };
 }
 
 function parsePins(approval: { pinsJson?: string | null }): ApprovalPins | null {
@@ -314,6 +324,25 @@ export class ApplicationService {
    */
   applyBatch(batchId: Id, approvalId: Id, actionSetHash: Sha256): Promise<BatchResult> {
     return this.withWriterLock(async () => {
+      // Root-scoped lock (spec review R6): one writer per root across every
+      // process, so a concurrent apply/resume/undo cannot interleave.
+      const rootId = this.repositories.batches.get(batchId)?.rootId ?? '';
+      const claim = rootId === '' ? null : this.repositories.locks.acquire(rootId, WRITER_LOCK_STALE_MS);
+      if (rootId !== '' && claim === null) {
+        return { batchId, results: [] };
+      }
+      try {
+        return await this.applyBatchLocked(batchId, approvalId, actionSetHash);
+      } finally {
+        if (rootId !== '' && claim !== null) {
+          this.repositories.locks.release(rootId, claim);
+        }
+      }
+    });
+  }
+
+  /** The apply body, run while holding this root's writer lock. */
+  private async applyBatchLocked(batchId: Id, approvalId: Id, actionSetHash: Sha256): Promise<BatchResult> {
       const batch = this.repositories.batches.get(batchId);
       if (batch === null) {
         return { batchId, results: [] };
@@ -392,7 +421,6 @@ export class ApplicationService {
         results.push(await this.runApplyAction(batch, approval.id, action));
       }
       return { batchId, results };
-    });
   }
 
   /**
@@ -488,6 +516,16 @@ export class ApplicationService {
         ? `cancellation was requested and no effect had occurred (${outcome.value.reason})`
         : `cancellation was requested and the locations could not be resolved (${outcome.detail})`,
     };
+  }
+
+  /** Looks up the current catalogue entry for journalled target segments. */
+  private destinationForSegments(segments: string[]): Destination | undefined {
+    for (const destination of this.destinations.values()) {
+      if (destination.segments.length === segments.length && destination.segments.every((segment, index) => segment === segments[index])) {
+        return destination;
+      }
+    }
+    return undefined;
   }
 
   /** The verified "after" snapshot of a completed forward move. */
@@ -760,6 +798,13 @@ export class ApplicationService {
     // action. UNIQUE(proposal, version, mode) makes a double claim fail
     // loudly rather than duplicate an effect.
     if (existingActionId === undefined) {
+      // Immutable action data (spec review R6): what was promised, written
+      // once at claim time and never re-read from the mutable proposal.
+      const destinationPin = this.repositories.approvals
+        .get(approvalId)
+        ?.pinsJson !== undefined && this.repositories.approvals.get(approvalId)?.pinsJson !== null
+        ? pinFor(JSON.parse(this.repositories.approvals.get(approvalId)!.pinsJson!) as ApprovalPins, action.proposalId)
+        : null;
       this.repositories.transaction(() => {
         this.repositories.actions.save({
           id: actionId,
@@ -768,6 +813,10 @@ export class ApplicationService {
           mode: 'apply',
           approvalId,
           state: 'planned',
+          sourceBasename: proposal.basename,
+          targetSegments: [...destination.segments],
+          expectedSnapshot: proposal.expected,
+          ...(destinationPin === null ? {} : { destinationPin }),
         });
         this.repositories.actions.appendEvent(actionId, {
           event: 'planned',
@@ -867,6 +916,7 @@ export class ApplicationService {
     batch: { id: Id; rootId: Id },
     existing: { id: Id; proposalId: Id; approvalId: Id },
   ): Promise<ActionResult> {
+    const record = this.repositories.actions.get(existing.id);
     const proposal = this.repositories.proposals.get(existing.proposalId);
     if (proposal === null) {
       return { actionId: existing.id, proposalId: existing.proposalId, outcome: 'stale', detail: 'proposal vanished' };
@@ -875,12 +925,28 @@ export class ApplicationService {
     if (root === null) {
       return { actionId: existing.id, proposalId: existing.proposalId, outcome: 'conflict', detail: 'root record is unavailable' };
     }
-    const destination = this.destinations.get(proposal.destinationId);
+    // The journal's own immutable data wins over the current proposal row
+    // (spec review R6): recovery must act on what was journalled.
+    const sourceBasename = record?.sourceBasename ?? proposal.basename;
+    const targetSegments = record?.targetSegments ?? null;
+    const expected = record?.expectedSnapshot ?? proposal.expected;
+    const destination =
+      targetSegments === null ? this.destinations.get(proposal.destinationId) : this.destinationForSegments(targetSegments);
     if (destination === undefined) {
       return { actionId: existing.id, proposalId: existing.proposalId, outcome: 'conflict', detail: 'destination absent from the catalogue' };
     }
+    // The journaled destination pin must still match the observed catalogue.
+    const pin = record?.destinationPin ?? null;
+    if (pin !== null && (pin.destinationId !== destination.id || pin.device !== destination.device || pin.inode !== destination.inode)) {
+      return {
+        actionId: existing.id,
+        proposalId: existing.proposalId,
+        outcome: 'conflict',
+        detail: `destination ${pin.destinationId} identity changed since the action was journalled; review required`,
+      };
+    }
 
-    const observations = await this.observe(root, proposal.basename, destination.segments);
+    const observations = await this.observe(root, sourceBasename, destination.segments);
     if (!observations.ok) {
       return { actionId: existing.id, proposalId: existing.proposalId, outcome: 'conflict', detail: observations.detail };
     }
@@ -892,8 +958,8 @@ export class ApplicationService {
         mode: 'apply',
         approvalId: existing.approvalId,
         state: 'intent',
-        expected: proposal.expected,
-        sourceBasename: proposal.basename,
+        expected,
+        sourceBasename,
         targetSegments: destination.segments,
         approvalValid: this.approvalValid(existing.approvalId),
       },
@@ -1029,6 +1095,19 @@ export class ApplicationService {
     return this.withWriterLock(async () => {
       const batch = this.repositories.batches.get(batchId);
       if (batch === null) return { batchId, results: [] };
+      // Root-scoped lock (spec review R6): resume serialises with apply/undo
+      // across processes, so an interrupted action is never reconciled twice.
+      const claim = this.repositories.locks.acquire(batch.rootId, WRITER_LOCK_STALE_MS);
+      if (claim === null) return { batchId, results: [] };
+      try {
+        return await this.resumeBatchLocked(batchId, batch);
+      } finally {
+        this.repositories.locks.release(batch.rootId, claim);
+      }
+    });
+  }
+
+  private async resumeBatchLocked(batchId: Id, batch: { id: Id; rootId: Id; cancellationRequested: boolean }): Promise<BatchResult> {
       const approvals = this.repositories.approvals.listByBatch(batchId);
       const results: ActionResult[] = [];
       const seen = new Set<string>();
@@ -1062,7 +1141,6 @@ export class ApplicationService {
         }
       }
       return { batchId, results };
-    });
   }
 
   /**
@@ -1145,6 +1223,7 @@ export class ApplicationService {
       }
       const undoActionId = undoAction?.id ?? `action-${randomUUID()}`;
       this.faultHook?.('before-undo-intent', { actionId: undoActionId, proposalId: action.proposalId });
+      const undoPinForSave = pinFor(undoPins, action.proposalId);
       this.repositories.transaction(() => {
         if (undoAction === null) {
           this.repositories.actions.save({
@@ -1154,6 +1233,10 @@ export class ApplicationService {
             mode: 'undo',
             approvalId: undoApprovalId,
             state: 'undo_intent',
+            sourceBasename: proposal.basename,
+            targetSegments: [...destination.segments],
+            expectedSnapshot: receipt.after ?? proposal.expected,
+            ...(undoPinForSave === null ? {} : { destinationPin: undoPinForSave }),
           });
         } else {
           this.repositories.actions.update(undoAction.id, { state: 'undo_intent' });

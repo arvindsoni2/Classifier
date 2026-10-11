@@ -49,6 +49,10 @@ export interface ActionEvent {
   payloadJson?: string;
 }
 
+export interface WriterLockOwner {
+  owner: string;
+}
+
 export interface ActionRecord {
   id: Id;
   proposalId: Id;
@@ -58,6 +62,18 @@ export interface ActionRecord {
   state: string;
   receiptJson: string | null;
   events: ActionEvent[];
+  /** Immutable action data captured at intent time (spec review R6). */
+  sourceBasename: string | null;
+  targetSegments: string[] | null;
+  expectedSnapshot: Snapshot | null;
+  destinationPin: { destinationId: Id; device: string; inode: string } | null;
+}
+
+export interface ActionEventRecord {
+  event: ActionEventKind;
+  recordedAt: string;
+  payloadHash: string;
+  payloadJson: string | null;
 }
 
 export interface ApprovalRecord {
@@ -89,6 +105,11 @@ export interface ActionSaveInput {
   mode: 'apply' | 'undo';
   approvalId: Id;
   state: string;
+  /** Immutable action data captured at intent time (spec review R6). */
+  sourceBasename?: string;
+  targetSegments?: string[];
+  expectedSnapshot?: Snapshot;
+  destinationPin?: { destinationId: Id; device: string; inode: string };
 }
 
 export interface Repositories {
@@ -124,10 +145,21 @@ export interface Repositories {
   actions: {
     save(input: ActionSaveInput): void;
     appendEvent(actionId: Id, event: ActionEvent): void;
+    events(actionId: Id): ActionEventRecord[];
     get(actionId: Id): ActionRecord | null;
     find(proposalId: Id, proposalVersion: Revision, mode: 'apply' | 'undo'): ActionRecord | null;
     listByApproval(approvalId: Id): ActionRecord[];
     update(actionId: Id, update: { state: string; receiptJson?: string | null }): void;
+  };
+  locks: {
+    /**
+     * Claims the root for one writer (apply/recovery/undo) and returns the
+     * owner token to release with, or null when another live owner holds it.
+     * A stale owner (crashed process) is taken over. One root, one writer,
+     * across every process.
+     */
+    acquire(rootId: Id, staleAfterMs: number): string | null;
+    release(rootId: Id, owner: string): void;
   };
   folderCandidates: {
     insert(candidate: FolderCandidateRecord): void;
@@ -181,6 +213,10 @@ interface ActionRow {
   mode: string;
   state: string;
   receipt_json: string | null;
+  source_basename: string | null;
+  target_segments_json: string | null;
+  expected_snapshot_json: string | null;
+  destination_pin_json: string | null;
 }
 
 interface ItemRow {
@@ -194,6 +230,8 @@ interface ItemRow {
 interface EventRow {
   event: string;
   recorded_at: string;
+  payload_hash: string;
+  payload_json: string | null;
 }
 
 function mapProposalRow(row: ProposalRow): Proposal {
@@ -209,6 +247,40 @@ function mapProposalRow(row: ProposalRow): Proposal {
     policyRevision: row.policy_revision,
     decisionIds: JSON.parse(row.decision_ids_json) as Id[],
     state: row.state as Proposal['state'],
+  };
+}
+
+function mapActionRow(row: ActionRow, eventRows: EventRow[]): ActionRecord {
+  // The journal retains the payload alongside its hash (spec review R6):
+  // recovery must be able to read what was journalled.
+  const events: ActionEvent[] = eventRows.map((eventRow) => {
+    const event: ActionEvent = {
+      event: eventRow.event as ActionEventKind,
+      recordedAt: eventRow.recorded_at,
+    };
+    if (eventRow.payload_json !== null) event.payloadJson = eventRow.payload_json;
+    return event;
+  });
+  return {
+    id: row.id,
+    proposalId: row.proposal_id,
+    proposalVersion: row.version,
+    mode: row.mode as 'apply' | 'undo',
+    approvalId: row.approval_id,
+    state: row.state,
+    receiptJson: row.receipt_json,
+    events,
+    sourceBasename: row.source_basename ?? null,
+    targetSegments:
+      typeof row.target_segments_json === 'string' ? (JSON.parse(row.target_segments_json) as string[]) : null,
+    expectedSnapshot:
+      typeof row.expected_snapshot_json === 'string'
+        ? (JSON.parse(row.expected_snapshot_json) as Snapshot)
+        : null,
+    destinationPin:
+      typeof row.destination_pin_json === 'string'
+        ? (JSON.parse(row.destination_pin_json) as { destinationId: Id; device: string; inode: string })
+        : null,
   };
 }
 
@@ -239,6 +311,31 @@ export function createRepositories(dbPath: string): Repositories {
   if (approvalColumns.length > 0 && !approvalColumns.some((column) => column.name === 'pins_json')) {
     db.exec('ALTER TABLE approvals ADD COLUMN pins_json TEXT');
   }
+  // R6 additive migrations: immutable action data, retained event payloads and
+  // the root-scoped writer lock. Existing rows keep working: nulls mean
+  // "pre-R6 journal", which the application treats as re-approval required.
+  const actionColumns = db.prepare('PRAGMA table_info(actions)').all() as { name: string }[];
+  for (const [column, ddl] of [
+    ['source_basename', 'ALTER TABLE actions ADD COLUMN source_basename TEXT'],
+    ['target_segments_json', 'ALTER TABLE actions ADD COLUMN target_segments_json TEXT'],
+    ['expected_snapshot_json', 'ALTER TABLE actions ADD COLUMN expected_snapshot_json TEXT'],
+    ['destination_pin_json', 'ALTER TABLE actions ADD COLUMN destination_pin_json TEXT'],
+  ] as const) {
+    if (actionColumns.length > 0 && !actionColumns.some((entry) => entry.name === column)) {
+      db.exec(ddl);
+    }
+  }
+  const eventColumns = db.prepare('PRAGMA table_info(action_events)').all() as { name: string }[];
+  if (eventColumns.length > 0 && !eventColumns.some((column) => column.name === 'payload_json')) {
+    db.exec('ALTER TABLE action_events ADD COLUMN payload_json TEXT');
+  }
+  db.exec(
+    `CREATE TABLE IF NOT EXISTS writer_locks (
+       root_id TEXT PRIMARY KEY,
+       owner TEXT NOT NULL,
+       acquired_at TEXT NOT NULL
+     )`,
+  );
 
   const insertRoot = db.prepare(
     `INSERT INTO roots (id, canonical_path, device, inode, policy_revision)
@@ -315,8 +412,9 @@ export function createRepositories(dbPath: string): Repositories {
     'SELECT * FROM approvals WHERE batch_id = ? ORDER BY rowid',
   );
   const insertAction = db.prepare(
-    `INSERT INTO actions (id, proposal_id, version, approval_id, mode, state, receipt_json)
-     VALUES (?, ?, ?, ?, ?, ?, NULL)`,
+    `INSERT INTO actions (id, proposal_id, version, approval_id, mode, state, receipt_json,
+       source_basename, target_segments_json, expected_snapshot_json, destination_pin_json)
+     VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)`,
   );
   const getAction = db.prepare('SELECT * FROM actions WHERE id = ?');
   const findAction = db.prepare(
@@ -327,11 +425,19 @@ export function createRepositories(dbPath: string): Repositories {
     'UPDATE actions SET state = ?, receipt_json = COALESCE(?, receipt_json) WHERE id = ?',
   );
   const getEvents = db.prepare(
-    'SELECT event, recorded_at FROM action_events WHERE action_id = ? ORDER BY seq',
+    // The payload is retained and returned (spec review R6): recovery must be
+    // able to read what was journalled, not only its hash.
+    'SELECT * FROM action_events WHERE action_id = ? ORDER BY seq',
   );
   const insertEvent = db.prepare(
-    'INSERT INTO action_events (action_id, event, recorded_at, payload_hash) VALUES (?, ?, ?, ?)',
+    'INSERT INTO action_events (action_id, event, recorded_at, payload_hash, payload_json) VALUES (?, ?, ?, ?, ?)',
   );
+  const claimLock = db.prepare(
+    `INSERT INTO writer_locks (root_id, owner, acquired_at) VALUES (?, ?, ?)
+     ON CONFLICT(root_id) DO UPDATE SET owner = excluded.owner, acquired_at = excluded.acquired_at
+     WHERE writer_locks.owner = excluded.owner OR writer_locks.acquired_at < ?`,
+  );
+  const releaseLock = db.prepare('DELETE FROM writer_locks WHERE root_id = ? AND owner = ?');
   const insertFolderCandidate = db.prepare(
     `INSERT INTO folder_candidates (id, batch_id, label, members_json, destination_parent_id, review_state)
      VALUES (?, ?, ?, ?, ?, ?)`,
@@ -536,67 +642,58 @@ export function createRepositories(dbPath: string): Repositories {
           input.approvalId,
           input.mode,
           input.state,
+          input.sourceBasename ?? null,
+          input.targetSegments === undefined ? null : JSON.stringify(input.targetSegments),
+          input.expectedSnapshot === undefined ? null : JSON.stringify(input.expectedSnapshot),
+          input.destinationPin === undefined ? null : JSON.stringify(input.destinationPin),
         );
       },
       appendEvent(actionId, event) {
         const payloadJson = event.payloadJson ?? '';
         const payloadHash = createHash('sha256').update(payloadJson).digest('hex');
-        insertEvent.run(actionId, event.event, event.recordedAt, payloadHash);
+        insertEvent.run(actionId, event.event, event.recordedAt, payloadHash, payloadJson);
       },
-      get(actionId) {
+      events(actionId) {
+        const rows = getEvents.all(actionId) as EventRow[];
+        return rows.map((row) => ({
+          event: row.event as ActionEventKind,
+          recordedAt: row.recorded_at,
+          payloadHash: row.payload_hash,
+          payloadJson: row.payload_json ?? null,
+        }));
+      },
+      get(actionId: Id) {
         const row = getAction.get(actionId) as ActionRow | undefined;
         if (row === undefined) return null;
-        const eventRows = getEvents.all(actionId) as EventRow[];
-        // The journal stores the event name, timestamp and payload hash
-        // (LLD §4); payload content is not duplicated into the journal.
-        const events: ActionEvent[] = eventRows.map((eventRow) => ({
-          event: eventRow.event as ActionEventKind,
-          recordedAt: eventRow.recorded_at,
-        }));
-        return {
-          id: row.id,
-          proposalId: row.proposal_id,
-          proposalVersion: row.version,
-          mode: row.mode as 'apply' | 'undo',
-          approvalId: row.approval_id,
-          state: row.state,
-          receiptJson: row.receipt_json,
-          events,
-        };
+        return mapActionRow(row, getEvents.all(row.id) as EventRow[]);
       },
       find(proposalId, proposalVersion, mode) {
         const row = findAction.get(proposalId, proposalVersion, mode) as ActionRow | undefined;
         if (row === undefined) return null;
-        const eventRows = getEvents.all(row.id) as EventRow[];
-        return {
-          id: row.id,
-          proposalId: row.proposal_id,
-          proposalVersion: row.version,
-          mode: row.mode as 'apply' | 'undo',
-          approvalId: row.approval_id,
-          state: row.state,
-          receiptJson: row.receipt_json,
-          events: eventRows.map((eventRow) => ({
-            event: eventRow.event as ActionEventKind,
-            recordedAt: eventRow.recorded_at,
-          })),
-        };
+        return mapActionRow(row, getEvents.all(row.id) as EventRow[]);
       },
       listByApproval(approvalId) {
         const rows = listActionsByApproval.all(approvalId) as ActionRow[];
-        return rows.map((row) => ({
-          id: row.id,
-          proposalId: row.proposal_id,
-          proposalVersion: row.version,
-          mode: row.mode as 'apply' | 'undo',
-          approvalId: row.approval_id,
-          state: row.state,
-          receiptJson: row.receipt_json,
-          events: [],
-        }));
+        return rows.map((row) => mapActionRow(row, []));
       },
       update(actionId, update) {
         updateAction.run(update.state, update.receiptJson ?? null, actionId);
+      },
+    },
+    locks: {
+      acquire(rootId, staleAfterMs) {
+        const owner = `writer-${randomUUID()}`;
+        const acquiredAt = new Date().toISOString();
+        const staleBefore = new Date(Date.now() - staleAfterMs).toISOString();
+        return transaction(() => {
+          // INSERT ... ON CONFLICT only takes over a stale lock, so a second
+          // live writer never steals the root.
+          const result = claimLock.run(rootId, owner, acquiredAt, staleBefore);
+          return result.changes === 1 ? owner : null;
+        });
+      },
+      release(rootId, owner) {
+        releaseLock.run(rootId, owner);
       },
     },
     folderCandidates: {
