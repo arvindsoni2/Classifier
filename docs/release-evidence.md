@@ -78,9 +78,9 @@ pnpm run doctor  → exit 0
   kernel-enforced EXDEV path is verified in tests; a real second mount inside
   a live Downloads root was not constructed (privileged setup) — the design
   defers that case.
-- Real Downloads: no scan has been performed against the user's actual
-  Downloads directory. Development used synthetic fixtures only
-  (AGENTS.md rule 12).
+- Real Downloads classification/moves: none performed. The supervised pilot
+  is at the read-only scan stage; development otherwise used synthetic
+  fixtures only (AGENTS.md rule 12).
 
 ## 5. Known limitations (honest, release-facing)
 
@@ -93,3 +93,27 @@ pnpm run doctor  → exit 0
   treatment is ≈ 75 minutes per provider.
 - Cross-site request protection is enforced server-side (Origin/Host); UI
   warnings are not treated as a security control.
+
+## 6. Supervised laptop pilot (read-only scan, 2026-10-11)
+
+Run through the completed app: the CLI `scan` verb and the UI scan verb
+(`POST /api/batches`) produced identical results. No filesystem writes were
+made to Downloads at any point; storage lives outside the root at
+`~/.local/share/fedora-organiser/organiser.sqlite` (mode 0600).
+
+- Resolved root: `/home/asoni/Downloads` (XDG `$HOME/Downloads`, device 50,
+  inode 311, policy revision 1). The root was passed explicitly via
+  `ORGANISER_ROOT`; the app has no implicit home fallback.
+- Scan result: 72 candidates, 37 deferred, 499 destination directories
+  (inbox depth zero, destination discovery depth three).
+- Exclusions: 21 direct-child directories (depth-zero inbox accepts regular
+  files only) and 16 files over the 100 MiB candidate ceiling (largest
+  1.66 GB) — all listed, none eligible.
+- Taxonomy: revision 1, seed group only. Automatic adoption of the 499
+  discovered folders was refused by `MAX_CHILDREN_PER_NODE = 7` — the intended
+  curation guard, not a failure. Proposed additions start empty and are
+  produced by classification (folder candidates) or user curation in the UI.
+- Proposals: 0 — no classification has been run against real files.
+- No runtime approval was created. Matching treatments and the first
+  supervised batch remain pending user labels plus an explicit approval
+  inside the app.
