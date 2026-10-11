@@ -66,6 +66,8 @@ export interface ApprovalRecord {
   selectedActionsJson: string;
   expiresAt: string;
   mode: 'apply' | 'undo';
+  /** Root/destination identity captured at approval time (R2). */
+  pinsJson: string | null;
 }
 
 export interface FolderCandidateRecord {
@@ -142,6 +144,7 @@ interface ApprovalRow {
   selected_actions_json: string;
   expires_at: string;
   mode: string;
+  pins_json: string | null;
 }
 
 interface FolderCandidateRow {
@@ -226,6 +229,13 @@ export function createRepositories(dbPath: string): Repositories {
   }
 
   db.exec(readFileSync(new URL('./schema.sql', import.meta.url), 'utf8'));
+  // Additive migration: databases created before the R2 pins column gain it
+  // without losing rows. Existing approvals stay readable and report no pins,
+  // which the application treats as "re-approve required", never as a bypass.
+  const approvalColumns = db.prepare('PRAGMA table_info(approvals)').all() as { name: string }[];
+  if (approvalColumns.length > 0 && !approvalColumns.some((column) => column.name === 'pins_json')) {
+    db.exec('ALTER TABLE approvals ADD COLUMN pins_json TEXT');
+  }
 
   const insertRoot = db.prepare(
     `INSERT INTO roots (id, canonical_path, device, inode, policy_revision)
@@ -295,8 +305,8 @@ export function createRepositories(dbPath: string): Repositories {
   );
   const insertApproval = db.prepare(
     `INSERT INTO approvals (id, batch_id, action_set_hash, taxonomy_revision, policy_revision,
-       selected_actions_json, expires_at, mode)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+       selected_actions_json, expires_at, mode, pins_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );  const getApproval = db.prepare('SELECT * FROM approvals WHERE id = ?');
   const listApprovalsByBatch = db.prepare(
     'SELECT * FROM approvals WHERE batch_id = ? ORDER BY rowid',
@@ -481,6 +491,7 @@ export function createRepositories(dbPath: string): Repositories {
           approval.selectedActionsJson,
           approval.expiresAt,
           approval.mode,
+          approval.pinsJson,
         );
       },
       get(id) {
@@ -495,6 +506,7 @@ export function createRepositories(dbPath: string): Repositories {
           selectedActionsJson: row.selected_actions_json,
           expiresAt: row.expires_at,
           mode: row.mode as 'apply' | 'undo',
+          pinsJson: row.pins_json ?? null,
         };
       },
       listByBatch(batchId) {
@@ -508,6 +520,7 @@ export function createRepositories(dbPath: string): Repositories {
           selectedActionsJson: row.selected_actions_json,
           expiresAt: row.expires_at,
           mode: row.mode as 'apply' | 'undo',
+          pinsJson: row.pins_json ?? null,
         }));
       },
     },

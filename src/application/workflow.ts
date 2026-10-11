@@ -99,6 +99,27 @@ export interface BatchResult {
 
 const TERMINAL_STATES = new Set(['applied', 'conflict', 'stale', 'canceled', 'undone']);
 
+/**
+ * Root/destination identity captured when an approval was created (spec
+ * review R2). `apply` and `undo` must act on these pins: a directory that was
+ * replaced after approval conflicts instead of silently re-pinning.
+ */
+export interface ApprovalPins {
+  root: { device: string; inode: string };
+  destinations: { proposalId: Id; destinationId: Id; device: string; inode: string }[];
+}
+
+function parsePins(approval: { pinsJson?: string | null }): ApprovalPins | null {
+  if (approval.pinsJson === undefined || approval.pinsJson === null) return null;
+  try {
+    const parsed = JSON.parse(approval.pinsJson) as ApprovalPins;
+    if (typeof parsed.root?.device !== 'string' || !Array.isArray(parsed.destinations)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
 export class ApplicationService {
   private readonly repositories: Repositories;
   private readonly helper: HelperPort;
@@ -158,6 +179,30 @@ export class ApplicationService {
         return err('OUT_OF_SCOPE', `proposal ${proposal.id} does not belong to batch ${batchId}`);
       }
     }
+    // Identity pins (spec review R2): the root and destination identities as
+    // observed now. A later re-discovery that replaces a directory must not
+    // rewrite these expectations — it conflicts instead.
+    const root = this.rootConfigFor(batch.rootId);
+    if (root === null) return err('OUT_OF_SCOPE', `root record for batch ${batchId} is unavailable`);
+    const pins: ApprovalPins = {
+      root: { device: root.device, inode: root.inode },
+      destinations: [],
+    };
+    for (const proposal of selected) {
+      const destination = this.destinations.get(proposal.destinationId);
+      if (destination === undefined) {
+        return err(
+          'OUT_OF_SCOPE',
+          `destination ${proposal.destinationId} is absent from the catalogue; re-scan before approving`,
+        );
+      }
+      pins.destinations.push({
+        proposalId: proposal.id,
+        destinationId: destination.id,
+        device: destination.device,
+        inode: destination.inode,
+      });
+    }
     const created = createApprovalCore(batch, selected, mode, now);
     if (!created.ok) return created;
     this.repositories.approvals.insert({
@@ -169,6 +214,7 @@ export class ApplicationService {
       selectedActionsJson: JSON.stringify(created.value.actions),
       expiresAt: created.value.expiresAt,
       mode,
+      pinsJson: JSON.stringify(pins),
     });
     return ok({ id: created.value.id, actionSetHash: created.value.actionSetHash, expiresAt: created.value.expiresAt });
   }
@@ -316,6 +362,46 @@ export class ApplicationService {
   }
 
   /**
+   * Verifies the approval's identity pins against the current durable root
+   * record and discovery catalogue (spec review R2). A missing pin means an
+   * approval created before pins existed: re-approval is required, never a
+   * silent pass.
+   */
+  private pinnedIdentity(
+    batch: { rootId: Id },
+    approvalId: Id,
+    proposalId: Id,
+  ): Result<void> {
+    const approval = this.repositories.approvals.get(approvalId);
+    if (approval === null) return err('STALE', 'the approval vanished');
+    const pins = parsePins(approval);
+    if (pins === null) {
+      return err('STALE', 'the approval carries no identity pins; re-approve the current selection');
+    }
+    const pin = pins.destinations.find((entry) => entry.proposalId === proposalId);
+    if (pin === undefined) {
+      return err('STALE', 'the approval does not pin this proposal destination');
+    }
+    const destination = this.destinations.get(pin.destinationId);
+    if (destination === undefined || destination.device !== pin.device || destination.inode !== pin.inode) {
+      return err(
+        'CONFLICT',
+        `destination ${pin.destinationId} identity changed since approval ` +
+          `(pinned ${pin.device}:${pin.inode}, observed ${destination === undefined ? 'absent' : `${destination.device}:${destination.inode}`}); review required`,
+      );
+    }
+    const root = this.rootConfigFor(batch.rootId);
+    if (root === null || root.device !== pins.root.device || root.inode !== pins.root.inode) {
+      return err(
+        'CONFLICT',
+        `root identity changed since approval ` +
+          `(pinned ${pins.root.device}:${pins.root.inode}, observed ${root === null ? 'absent' : `${root.device}:${root.inode}`}); review required`,
+      );
+    }
+    return ok(undefined);
+  }
+
+  /**
    * Runs one approved action: claim → intent → helper → verified commit.
    * Every step is journalled; fault points simulate process death.
    */
@@ -347,6 +433,14 @@ export class ApplicationService {
       }
       // Fall through to resume-style handling below via reconciliation.
       return this.resumeApplyAction(batch, existing);
+    }
+
+    // Identity pins (spec review R2): the approved root/destination identity
+    // must still be what discovery observes now. A replaced directory is a
+    // conflict, never a silent re-pin.
+    const pinned = this.pinnedIdentity(batch, approvalId, action.proposalId);
+    if (!pinned.ok) {
+      return { actionId, proposalId: action.proposalId, outcome: 'conflict', detail: pinned.detail };
     }
 
     const root = this.rootConfigFor(batch.rootId);
@@ -688,8 +782,28 @@ export class ApplicationService {
 
       const proposal = this.repositories.proposals.get(action.proposalId);
       if (proposal === null) return err('OUT_OF_SCOPE', 'proposal vanished');
+      // Identity pins (spec review R2): the reverse move must also target the
+      // destination identity the undo approval pinned.
+      const undoPins = parsePins(undoApproval);
+      if (undoPins === null) {
+        return err('STALE', 'the undo approval carries no identity pins; re-approve the undo');
+      }
+      const undoPin = undoPins.destinations.find((entry) => entry.proposalId === action.proposalId);
+      if (undoPin === undefined) {
+        return err('STALE', 'the undo approval does not pin this action');
+      }
       const destination = this.destinations.get(proposal.destinationId);
-      if (destination === undefined) return err('OUT_OF_SCOPE', 'destination absent from the catalogue');
+      if (
+        destination === undefined ||
+        destination.id !== undoPin.destinationId ||
+        destination.device !== undoPin.device ||
+        destination.inode !== undoPin.inode
+      ) {
+        return err(
+          'CONFLICT',
+          `destination ${proposal.destinationId} identity changed since the undo approval; review required`,
+        );
+      }
       const batch = this.repositories.batches.get(undoApproval.batchId);
       if (batch === null) return err('OUT_OF_SCOPE', 'batch vanished');
       const root = this.rootConfigFor(batch.rootId);

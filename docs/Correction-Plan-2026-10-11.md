@@ -40,10 +40,19 @@ it (read-only scan recorded; taxonomy handoff pending).
   restart does not reset it) and the durable root policy revision. Six
   negative authorisation tests in approval-authorisation.test.ts, all through
   the real ApplicationService/Organiser wiring.
-- [ ] **R2** Persist root/destination identity (device+inode) with the approved
+- [x] **R2** Persist root/destination identity (device+inode) with the approved
   action; compare current observation against the approved pins; a renamed
   destination must surface a conflict, not silently re-pin. Discovery refresh
   must not rewrite outstanding approvals.
+  Fixed: approvals carry `pins_json` (root device/inode + per-proposal
+  destination device/inode captured from the discovery catalogue at approval
+  time; additive schema migration for existing databases). `apply` and `undo`
+  verify the pins against the durable root record and the refreshed catalogue
+  before any helper call: a replaced destination directory or a changed root
+  identity is a `conflict` with the pinned vs observed identity in the detail,
+  never a re-pin. An approval without pins (pre-migration row) requires
+  re-approval. Tests: replaced destination, changed root identity, and the
+  stable happy path.
 - [ ] **R3** Classification opens files through the source adapter with
   anchored, no-symlink/no-mount resolution and verifies the opened descriptor
   against the scanned snapshot before extraction; symlink-to-outside-root

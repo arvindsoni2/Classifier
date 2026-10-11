@@ -80,7 +80,10 @@ CREATE TABLE IF NOT EXISTS approvals (
   policy_revision INTEGER NOT NULL,
   selected_actions_json TEXT NOT NULL,
   expires_at TEXT NOT NULL,
-  mode TEXT NOT NULL
+  mode TEXT NOT NULL,
+  -- Identity pins captured at approval time (spec review R2). An apply/undo
+  -- must move to the destination identity the user actually approved.
+  pins_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS actions (

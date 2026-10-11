@@ -151,6 +151,10 @@ export interface World {
   dir: string;
   rootDir: string;
   repositories: ReturnType<typeof createRepositories>;
+  /** The discovery catalogue the workflow validates destination pins against. */
+  destinations: Map<string, Destination>;
+  /** Simulates re-discovery replacing a destination directory's identity. */
+  swapDestinationIdentity: (destinationId: string, device: string, inode: string) => void;
   root: RootConfig;
   batch: { id: string; rootId: string };
   items: Item[];
@@ -275,6 +279,12 @@ export function makeWorld(
     dir,
     rootDir,
     repositories,
+    destinations,
+    swapDestinationIdentity(destinationId, device, inode) {
+      const current = destinations.get(destinationId);
+      if (current === undefined) throw new Error(`unknown destination ${destinationId}`);
+      destinations.set(destinationId, { ...current, device, inode });
+    },
     root,
     batch,
     items,

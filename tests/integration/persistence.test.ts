@@ -114,6 +114,9 @@ describe('createRepositories', () => {
       selectedActionsJson: JSON.stringify([{ proposalId: proposal.id, version: 1 }]),
       expiresAt: '2026-10-08T00:00:00.000Z',
       mode: 'apply',
+      // A row created before identity pins existed reads back pin-less; the
+      // application then requires re-approval rather than bypassing pins.
+      pinsJson: null,
     });
 
     repos.actions.save({
