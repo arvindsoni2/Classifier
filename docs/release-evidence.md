@@ -114,6 +114,13 @@ made to Downloads at any point; storage lives outside the root at
   curation guard, not a failure. Proposed additions start empty and are
   produced by classification (folder candidates) or user curation in the UI.
 - Proposals: 0 — no classification has been run against real files.
+- First classification attempt (rules provider, read-only): 72/72 items
+  refused with `INVALID_DECISION: no routing answers`. Cause is the taxonomy
+  handoff, not extraction or the provider: the seed taxonomy carries the root
+  group only, so no category exists to route to and the app will not invent a
+  destination (FR-05). Nothing was persisted (0 evidence, 0 decisions,
+  0 proposals). Curation of at least one category in the review UI is the
+  required next step before classification can produce proposals.
 - No runtime approval was created. Matching treatments and the first
   supervised batch remain pending user labels plus an explicit approval
   inside the app.
