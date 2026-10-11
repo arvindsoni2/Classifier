@@ -77,6 +77,9 @@ pub struct KernelCaps {
 
 // open(2) flags.
 const O_RDONLY: i32 = 0;
+const O_WRONLY: i32 = 1;
+const O_CREAT: i32 = 0o100;
+const O_EXCL: i32 = 0o200;
 const O_DIRECTORY: i32 = 0o200000;
 const O_NOFOLLOW: i32 = 0o400000;
 const O_CLOEXEC: i32 = 0o2000000;
@@ -357,38 +360,137 @@ pub fn mkdirat_exclusive(
     })
 }
 
-/// Probes the mandatory primitives with non-mutating dry calls: ENOSYS means
-/// unsupported; any other errno means the syscall ran.
+/// Name of the application-owned probe directory inside the root. The probe
+/// only ever creates, inspects and removes names inside this directory; a
+/// collision with user data aborts the probe instead of touching the data.
+const PROBE_DIR: &str = ".fsops-probe";
+const PROBE_SRC: &str = "probe-src";
+const PROBE_DST: &str = "probe-dst";
+
+/// Verifies the mandatory primitives. `renameat2_noreplace` is proven with a
+/// real no-overwrite fixture inside an application-owned directory, never by
+/// renaming a name the application does not own.
 pub fn probe_kernel(root: &RootHandle) -> KernelCaps {
     let openat2 = match openat2_errno(root.fd(), ".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) {
         Ok(_) => true,
         Err(errno) => errno != libc::ENOSYS,
     };
-    // renameat2 dry probe on two never-existing names: ENOENT proves support.
-    let renameat2 = {
-        let a = CString::new(".fsops-kernel-probe-a").unwrap();
-        let b = CString::new(".fsops-kernel-probe-b").unwrap();
+    KernelCaps {
+        openat2,
+        renameat2_noreplace: probe_rename_noreplace(root),
+    }
+}
+
+enum ProbeOutcome {
+    /// The flag blocked an overwriting rename of an existing target.
+    Enforced,
+    /// The primitive ran but did not enforce no-overwrite: apply stays off.
+    NotEnforced,
+    /// The probe could not run (blocked, unsupported syscall/filesystem).
+    Unavailable,
+}
+
+/// Creates two probe files the application owns and requires an overwriting
+/// rename of one onto the other to fail with EEXIST. rc == 0 would mean an
+/// overwrite succeeded, so the flag is not enforced and apply must be
+/// disabled — there is deliberately no fallback to an ordinary rename.
+fn probe_rename_noreplace(root: &RootHandle) -> bool {
+    match probe_fixture(root) {
+        ProbeOutcome::Enforced => true,
+        ProbeOutcome::NotEnforced | ProbeOutcome::Unavailable => false,
+    }
+}
+
+fn probe_fixture(root: &RootHandle) -> ProbeOutcome {
+    let probe_dir = match open_probe_dir(root) {
+        Some(dir) => dir,
+        None => return ProbeOutcome::Unavailable,
+    };
+    if !create_probe_file(&probe_dir, PROBE_SRC) || !create_probe_file(&probe_dir, PROBE_DST) {
+        remove_probe_fixture(root, &probe_dir);
+        return ProbeOutcome::Unavailable;
+    }
+
+    let outcome = {
+        let src = CString::new(PROBE_SRC).unwrap();
+        let dst = CString::new(PROBE_DST).unwrap();
         let rc = unsafe {
             libc::syscall(
                 libc::SYS_renameat2,
-                root.fd(),
-                a.as_ptr(),
-                root.fd(),
-                b.as_ptr(),
+                probe_dir.as_raw_fd(),
+                src.as_ptr(),
+                probe_dir.as_raw_fd(),
+                dst.as_ptr(),
                 RENAME_NOREPLACE,
             )
         };
         if rc == -1 {
             let errno = unsafe { *libc::__errno_location() };
-            errno != libc::ENOSYS
+            match errno {
+                libc::EEXIST => ProbeOutcome::Enforced,
+                libc::ENOSYS | libc::EINVAL | libc::EOPNOTSUPP => {
+                    ProbeOutcome::NotEnforced
+                }
+                _ => ProbeOutcome::Unavailable,
+            }
         } else {
-            true
+            // An overwriting rename succeeded: the flag is not enforced.
+            ProbeOutcome::NotEnforced
         }
     };
-    KernelCaps {
-        openat2,
-        renameat2_noreplace: renameat2,
+    remove_probe_fixture(root, &probe_dir);
+    outcome
+}
+
+/// Opens (creating when absent) the application-owned probe directory. A
+/// non-directory at that name is user data: never replaced, never removed.
+fn open_probe_dir(root: &RootHandle) -> Option<File> {
+    match openat2_errno(root.fd(), PROBE_DIR, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) {
+        Ok(dir) => return Some(dir),
+        Err(libc::ENOENT) => {}
+        Err(_) => return None,
     }
+    let name = CString::new(PROBE_DIR).unwrap();
+    let rc = unsafe { libc::mkdirat(root.fd(), name.as_ptr(), 0o700) };
+    if rc == -1 {
+        let errno = unsafe { *libc::__errno_location() };
+        if errno != libc::EEXIST {
+            return None;
+        }
+    }
+    openat2_errno(root.fd(), PROBE_DIR, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC).ok()
+}
+
+/// Creates an exclusively-owned probe file; an existing regular file from a
+/// crashed earlier probe is reused, anything else aborts the probe.
+fn create_probe_file(dir: &File, name: &str) -> bool {
+    match openat2_errno(
+        dir.as_raw_fd(),
+        name,
+        O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+    ) {
+        Ok(_) => true,
+        Err(libc::EEXIST) => match openat2_errno(dir.as_raw_fd(), name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC) {
+            Ok(existing) => match fstat_of(existing.as_raw_fd()) {
+                Ok(stat) => is_regular(&stat),
+                Err(_) => false,
+            },
+            Err(_) => false,
+        },
+        Err(_) => false,
+    }
+}
+
+/// Removes only the probe files this function created and the probe directory
+/// when it is empty. Unknown names are never deleted; failures are ignored
+/// because a leftover probe directory is harmless and blocks no operation.
+fn remove_probe_fixture(root: &RootHandle, dir: &File) {
+    for name in [PROBE_SRC, PROBE_DST] {
+        let c_name = CString::new(name).unwrap();
+        unsafe { libc::unlinkat(dir.as_raw_fd(), c_name.as_ptr(), 0) };
+    }
+    let c_dir = CString::new(PROBE_DIR).unwrap();
+    unsafe { libc::unlinkat(root.fd(), c_dir.as_ptr(), libc::AT_REMOVEDIR) };
 }
 
 /// Kernel release string for health reports.

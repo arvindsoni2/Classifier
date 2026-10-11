@@ -273,6 +273,75 @@ fn cross_mount_is_deferred() {
 }
 
 #[test]
+fn kernel_probe_never_renames_user_files() {
+    // Spec review R7: the old probe renamed `.fsops-kernel-probe-a` when that
+    // name existed in the user root. A real file with that exact name must
+    // survive a probe untouched, and no probe target name may appear.
+    let fixture = Fixture::new("probe-user-file");
+    fixture.file(".fsops-kernel-probe-a", b"user data that must not be renamed\n");
+    let inode_before = fs::metadata(fixture.path(".fsops-kernel-probe-a"))
+        .expect("stat user file")
+        .ino();
+
+    let health = probe(&fixture.config()).expect("probe runs");
+    assert!(
+        health.renameat2_noreplace,
+        "a capable kernel must report RENAME_NOREPLACE support",
+    );
+
+    assert_eq!(
+        fs::read(fixture.path(".fsops-kernel-probe-a")).unwrap(),
+        b"user data that must not be renamed\n",
+        "the probe renamed user data",
+    );
+    let inode_after = fs::metadata(fixture.path(".fsops-kernel-probe-a"))
+        .expect("stat user file after probe")
+        .ino();
+    assert_eq!(inode_before, inode_after, "the user file was replaced");
+    assert!(
+        !fixture.path(".fsops-kernel-probe-b").exists(),
+        "the probe created its old target name in the user root",
+    );
+    assert!(
+        !fixture.path(".fsops-probe").exists(),
+        "the probe left its fixture directory behind",
+    );
+    fixture.sentinel_unchanged();
+}
+
+#[test]
+fn kernel_probe_reports_support_with_a_real_no_overwrite_fixture() {
+    // The capability is proven by an overwriting rename onto an existing
+    // application-owned target failing with EEXIST — a real fixture, not an
+    // assumption about errnos.
+    let fixture = Fixture::new("probe-capability");
+    let health = probe(&fixture.config()).expect("probe runs");
+    assert!(health.openat2, "openat2 must be reported on a modern kernel");
+    assert!(health.renameat2_noreplace);
+    assert!(health.root_verified);
+    assert!(!fixture.path(".fsops-probe").exists());
+    fixture.sentinel_unchanged();
+}
+
+#[test]
+fn kernel_probe_blocked_when_probe_path_is_user_data() {
+    // A regular file at the probe directory name is user data: the probe must
+    // abort as unsupported and leave the file exactly as it was.
+    let fixture = Fixture::new("probe-blocked");
+    fixture.file(".fsops-probe", b"not ours; never removed\n");
+    let health = probe(&fixture.config()).expect("probe runs");
+    assert!(
+        !health.renameat2_noreplace,
+        "a blocked probe must not claim RENAME_NOREPLACE support",
+    );
+    assert_eq!(
+        fs::read(fixture.path(".fsops-probe")).unwrap(),
+        b"not ours; never removed\n",
+    );
+    fixture.sentinel_unchanged();
+}
+
+#[test]
 fn unsupported_primitives_disable_apply() {
     let fixture = Fixture::new("kernel");
     fixture.dir("Documents");

@@ -44,9 +44,17 @@ it (read-only scan recorded; taxonomy handoff pending).
 - [ ] **R4** Monotonic proposal versions; persist rejection; regeneration must
   not revive an invalidated approval; eligibility validated in the domain
   service. Tests: edit→classify-again, reject→reload, apply→regenerate.
-- [ ] **R7** Native `probe_kernel()` must never rename user files: use an
+- [x] **R7** Native `probe_kernel()` must never rename user files: use an
   application-owned probe location, treat unexpected errnos (EEXIST etc.) as
   *unsupported/blocked*, not success, and assert no user-root mutation.
+  Fixed: the capability is now proven by an overwriting rename onto an
+  existing application-owned target inside `.fsops-probe/` expecting EEXIST;
+  rc==0 means the flag is not enforced → unsupported (apply disabled, no
+  fallback rename); ENOSYS/EINVAL/EOPNOTSUPP → unsupported; any other errno
+  (EPERM/EACCES…) → unavailable. A non-directory at the probe name is user
+  data: the probe aborts without touching it. Native tests: user file at the
+  old probe name survives byte- and inode-identical with no leftovers; real
+  capability report; blocked path leaves the file unchanged. 15 native tests.
 
 ## Phase 2 — durable execution (review step 2)
 

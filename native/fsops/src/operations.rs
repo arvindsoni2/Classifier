@@ -7,7 +7,6 @@
 //! with mode 0700. No delete, no shell, no copy/delete fallback, no
 //! collision suffix. EEXIST/EXDEV are surfaced as COLLISION/CROSS_MOUNT.
 
-use std::io::Read;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
