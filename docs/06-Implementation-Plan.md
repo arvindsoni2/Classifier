@@ -169,7 +169,7 @@ Project scripts created in Task 1: `test` (Vitest), `test:e2e` (Playwright), `ty
 - [x] Run `pnpm test`, `pnpm test:native`, `pnpm test:e2e`, `pnpm typecheck`, `pnpm lint`, `pnpm build` and `pnpm eval:fixture`; record exact commands/exit statuses.
 - [x] Run doctor on the laptop using synthetic inference/fixture operations. Record CPU/RAM/GPU, exact Laya/Clef/runtime revisions and memory/latency. Missing Clef health produces a blocked comparison, not substituted chat results.
 - [ ] Create development/calibration/test labels with Arvind and run matched treatments. Report held-out performance, failed cases and proposed usefulness targets without tuning against test labels.
-- [ ] Configure resolved Downloads root in read-only mode; show scan/exclusions, taxonomy and proposed additions. Do not create a runtime approval on the user's behalf from development approval.
+- [x] Configure resolved Downloads root in read-only mode; show scan/exclusions, taxonomy and proposed additions. Do not create a runtime approval on the user's behalf from development approval.
 - [ ] After the user approves a concrete small batch in the app, execute up to ten initial moves, inspect receipts, request undo for one eligible action and inspect recovery. This step remains pending until runtime approval exists; elapsed time does not provide approval.
 - [x] Write extension guidance covering normalised source capabilities, future account/API discovery and narrow MCP read tools. External writes/MCP approval transport need separate review.
 - [x] Commit the documentation and reviewed code changes; do not commit private files, credentials, labels or evidence blobs. Supply Codex with diff plus verification evidence for final review.

@@ -4,7 +4,9 @@
  * id and exact action-set hash and can never bypass web approvals or make
  * a provider write directly.
  */
+import { realpathSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { Id, Revision } from '../domain/contracts.js';
 import { Organiser } from '../application/organiser.js';
 import { probeProviders, loadProviderConfig } from './doctor.js';
@@ -188,6 +190,28 @@ export async function runCli(argv: readonly string[], options: CliOptions): Prom
   } finally {
     organiser.close();
   }
+}
+
+const isDirectRun = (): boolean => {
+  const entry = process.argv[1];
+  if (entry === undefined) return false;
+  try {
+    return realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+};
+
+if (isDirectRun()) {
+  void runCli(process.argv.slice(2), { cwd: process.cwd(), env: process.env }).then(
+    (code) => {
+      process.exitCode = code;
+    },
+    (error: unknown) => {
+      console.error((error as Error).message);
+      process.exitCode = 1;
+    },
+  );
 }
 
 export type { Id, Revision };
