@@ -101,7 +101,7 @@ Run through the completed app: the CLI `scan` verb and the UI scan verb
 made to Downloads at any point; storage lives outside the root at
 `~/.local/share/fedora-organiser/organiser.sqlite` (mode 0600).
 
-- Resolved root: `/home/asoni/Downloads` (XDG `$HOME/Downloads`, device 50,
+- Resolved root: `$HOME/Downloads` (XDG download directory, device 50,
   inode 311, policy revision 1). The root was passed explicitly via
   `ORGANISER_ROOT`; the app has no implicit home fallback.
 - Scan result: 72 candidates, 37 deferred, 499 destination directories

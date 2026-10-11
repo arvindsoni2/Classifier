@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
@@ -399,7 +400,8 @@ describe('LayaProvider (blocked without a local checkpoint)', () => {
    * only when the pinned bundle directory exists on this machine; the
    * synthetic fixture carries no ground-truth claim.
    */
-  const LAYA_BUNDLE = '/home/asoni/.cache/receptron-laya/receptron--laya-onnx/main';
+  const LAYA_BUNDLE =
+    process.env.LAYA_MODEL_DIR ?? join(homedir(), '.cache', 'receptron-laya', 'receptron--laya-onnx', 'main');
   const layaAvailable = existsSync(join(LAYA_BUNDLE, 'laya.onnx'));
   const describeRealModel = layaAvailable ? describe : describe.skip;
 
