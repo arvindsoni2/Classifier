@@ -83,6 +83,11 @@ test('unknown rows are disabled and cannot be approved', async ({ page }) => {
   await login(page);
   await page.getByRole('button', { name: /scan/i }).first().click();
   await expect(page.getByText(/^Batch /)).toBeVisible({ timeout: 30_000 });
+  // Classification requires a reviewed taxonomy (spec review R9).
+  await page.getByRole('link', { name: /taxonomy/i }).click();
+  await expect(page.getByRole('table')).toBeVisible({ timeout: 15_000 });
+  await page.getByRole('button', { name: /approve/i }).first().click();
+  await expect(page.getByRole('status')).toContainText(/approved|revision/i);
   await page.getByRole('link', { name: /placement/i }).click();
   await page.getByRole('button', { name: /classify|regenerate/i }).first().click();
   await expect(page.getByText('invoice-01.txt')).toBeVisible({ timeout: 15_000 });
@@ -101,6 +106,11 @@ test('keyboard and focus behaviour on the review dialog', async ({ page }) => {
   await login(page);
   await page.getByRole('button', { name: /scan/i }).first().click();
   await expect(page.getByText(/^Batch /)).toBeVisible({ timeout: 30_000 });
+  // Classification requires a reviewed taxonomy (spec review R9).
+  await page.getByRole('link', { name: /taxonomy/i }).click();
+  await expect(page.getByRole('table')).toBeVisible({ timeout: 15_000 });
+  await page.getByRole('button', { name: /approve/i }).first().click();
+  await expect(page.getByRole('status')).toContainText(/approved|revision/i);
   await page.getByRole('link', { name: /placement/i }).click();
   await page.getByRole('button', { name: /classify|regenerate/i }).first().click();
   await expect(page.getByText('invoice-01.txt')).toBeVisible({ timeout: 15_000 });

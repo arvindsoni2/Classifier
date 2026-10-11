@@ -131,11 +131,27 @@ it (read-only scan recorded; taxonomy handoff pending).
 
 ## Phase 3 — usable production workflow (review step 3)
 
-- [ ] **R9** Durable taxonomy revisions (persist/reload via
+- [x] **R9** Durable taxonomy revisions (persist/reload via
   `taxonomy_revisions`); keep discovered folders separate from the approved
   semantic tree; curation API + UI (add/edit/group/map, ≤7 children enforced
   with actionable errors); classification requires an explicitly reviewed
   taxonomy. Test: >7 physical folders, nested routing, restart before approval.
+  Fixed: the taxonomy revision persists and a restart resumes AT it (an
+  in-memory revision+1 would bind approvals to a revision the durable state
+  cannot confirm); `ensureRoot` treats the durable root record as
+  authoritative for the policy revision so a later review does not re-pin it;
+  `rebuildTaxonomy` surfaces its refusal as `taxonomyStatus` with the reason
+  instead of silently keeping the seed; `GET /api/taxonomy` exposes the
+  status, whether the tree is reviewed, and the discovered destination
+  catalogue for curation; `classify` refuses until a reviewed taxonomy exists
+  (clear instruction, not per-item failures); the new `taxonomy` CLI verb
+  displays the tree/status and `--review` approves it through the same
+  service; the TaxonomyReview UI gains add/remove category controls with a
+  destination picker, the curation banner with its reason, and the reviewed
+  state. Tests: nine folders surface `more than 7 children` with the
+  catalogue; classification is refused before review and works after; the
+  reviewed revision survives a restart and classifies there; explicit
+  curation replaces the automatic tree.
 - [ ] **R13** Review UX: build the exact human-readable summary (source/target
   paths, root, new dirs, conflicts, expiry) *before* issuing approval; approve
   only on explicit confirmation; full destination catalogue + category mapping;

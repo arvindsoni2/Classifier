@@ -387,12 +387,14 @@ export function createRepositories(dbPath: string): Repositories {
   );
 
   const insertRoot = db.prepare(
+    // Identity is refreshed on re-resolution; the policy revision stays as
+    // first recorded so a later taxonomy review does not silently re-pin the
+    // root's policy (approvals invalidate through the taxonomy revision).
     `INSERT INTO roots (id, canonical_path, device, inode, policy_revision)
      VALUES (?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
        device = excluded.device,
-       inode = excluded.inode,
-       policy_revision = excluded.policy_revision`,
+       inode = excluded.inode`,
   );
   const getRoot = db.prepare('SELECT * FROM roots WHERE id = ?');
   const insertItem = db.prepare(

@@ -109,6 +109,8 @@ export class Organiser {
   private readonly clock: () => Date;
   private readonly destinations = new Map<Id, { id: Id; segments: string[]; device: string; inode: string; status: 'observed' | 'approved' }>();
   private readonly taxonomy: Taxonomy;
+  /** Why the automatic taxonomy rebuild was refused, when it was (R9). */
+  private taxonomyStatus: { state: 'ok' } | { state: 'curation_required'; reason: string } = { state: 'ok' };
   private readonly configuredRootPath: string | undefined;
   private root: RootConfig | null = null;
   readonly service: ApplicationService;
@@ -164,7 +166,10 @@ export class Organiser {
     // see the reviewed revision, not reset to the seed.
     const storedTaxonomy = this.repositories.taxonomies.latest();
     if (storedTaxonomy !== null) {
-      this.taxonomy.revision = storedTaxonomy.revision + 1;
+      // Resume AT the persisted revision: an in-memory revision that was
+      // never persisted would bind approvals to a revision the durable state
+      // cannot confirm (spec review R1).
+      this.taxonomy.revision = storedTaxonomy.revision;
       this.taxonomy.mappingHash = storedTaxonomy.mappingHash;
       try {
         const parsed = JSON.parse(storedTaxonomy.treeJson) as Category[];
@@ -196,7 +201,6 @@ export class Organiser {
       policyRevision: this.taxonomy.revision,
     });
     if (!resolved.ok) throw new Error(`${resolved.code}: ${resolved.detail}`);
-    this.root = resolved.value;
     this.repositories.roots.insert({
       id: resolved.value.rootId,
       canonicalPath: resolved.value.absolutePath,
@@ -204,7 +208,15 @@ export class Organiser {
       inode: resolved.value.inode,
       policyRevision: resolved.value.policyRevision,
     });
-    return resolved.value;
+    // The durable root record is authoritative: re-resolution keeps the
+    // recorded policy revision instead of re-pinning it from the current
+    // in-memory taxonomy (spec review R1/R2).
+    const stored = this.repositories.roots.get(resolved.value.rootId);
+    this.root =
+      stored === null
+        ? resolved.value
+        : { ...resolved.value, policyRevision: stored.policyRevision };
+    return this.root;
   }
 
 
@@ -265,7 +277,12 @@ export class Organiser {
     if (validated.ok) {
       this.taxonomy.tree = validated.value.tree;
       this.taxonomy.mappingHash = validated.value.mappingHash;
+      this.taxonomyStatus = { state: 'ok' };
+      return;
     }
+    // The auto-built tree was refused (e.g. more than seven folders under a
+    // group): the reason is surfaced, never swallowed (spec review R9).
+    this.taxonomyStatus = { state: 'curation_required', reason: validated.detail };
   }
 
   /** Extraction + typed decisions + planning for every scanned item. */
@@ -276,6 +293,20 @@ export class Organiser {
     await this.refreshCatalogue();
     const batch = batchId ?? this.repositories.batches.listByRoot(root.rootId).at(-1)?.id;
     if (batch === undefined) throw new Error('no batch to classify; run scan first');
+    // A reviewed taxonomy is a precondition (spec review R9): routing into an
+    // unreviewed or refused tree would invent destinations. The message says
+    // exactly what to do instead of failing per item.
+    if (this.taxonomyStatus.state !== 'ok') {
+      throw new Error(
+        `OUT_OF_SCOPE: taxonomy curation required (${this.taxonomyStatus.reason}); ` +
+          'review the taxonomy in the UI before classifying',
+      );
+    }
+    if (this.repositories.taxonomies.latest() === null) {
+      throw new Error(
+        'OUT_OF_SCOPE: the taxonomy has not been reviewed yet; approve a curated taxonomy in the UI before classifying',
+      );
+    }
     const provider = this.providers.find((entry) => entry.providerId === providerId);
     if (provider === undefined) throw new Error(`provider ${providerId} is not configured`);
 
@@ -672,6 +703,7 @@ export class Organiser {
       this.clock().toISOString(),
     );
     this.repositories.proposals.markStaleBeforeRevision(previousRevision + 1);
+    this.taxonomyStatus = { state: 'ok' };
     return ok({ revision: this.taxonomy.revision, mappingHash: validated.value.mappingHash });
   }
 
@@ -681,8 +713,26 @@ export class Organiser {
   }
 
   /** HTTP surface: the current taxonomy with its expected revision. */
-  getTaxonomy(): Result<{ revision: Revision; tree: Category[]; mappingHash: string }> {
-    return ok({ revision: this.taxonomy.revision, tree: this.taxonomy.tree, mappingHash: this.taxonomy.mappingHash });
+  getTaxonomy(): Result<{
+    revision: Revision;
+    tree: Category[];
+    mappingHash: string;
+    status: { state: 'ok' } | { state: 'curation_required'; reason: string };
+    reviewed: boolean;
+    destinations: { id: Id; segments: string[] }[];
+  }> {
+    return ok({
+      revision: this.taxonomy.revision,
+      tree: this.taxonomy.tree,
+      mappingHash: this.taxonomy.mappingHash,
+      status: this.taxonomyStatus,
+      // An explicitly reviewed taxonomy is a persisted one; the seed tree is not.
+      reviewed: this.repositories.taxonomies.latest() !== null,
+      destinations: [...this.destinations.values()].map((destination) => ({
+        id: destination.id,
+        segments: destination.segments,
+      })),
+    });
   }
 
   /** HTTP surface: classification for a batch (provider + profile). */

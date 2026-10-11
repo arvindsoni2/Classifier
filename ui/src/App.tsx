@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import type { JSX } from 'react';
 import { TaxonomyReview } from './TaxonomyReview.js';
 import { PlacementReview } from './PlacementReview.js';
 import { RunHistory } from './RunHistory.js';

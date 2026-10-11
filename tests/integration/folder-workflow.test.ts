@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import { Organiser } from '../../src/application/organiser.js';
+import { reviewScannedTaxonomy } from '../helpers/review-taxonomy.js';
 import { createRepositories } from '../../src/adapters/persistence/repositories.js';
 
 /**
@@ -33,6 +34,7 @@ describe('reviewed new folders (R10)', () => {
     writeFileSync(join(rootDir, 'notes-c.txt'), 'eta theta iota\n', 'utf8');
     const organiser = new Organiser({ dbPath, rootPath: rootDir, stabilityWindowMs: 0 });
     await organiser.scan();
+    await reviewScannedTaxonomy(organiser);
     const classified = await organiser.classify(undefined, 'rules');
     // The rules baseline cannot place these, so they defer to unknown.
     expect(classified.deferred).toBe(3);
@@ -53,6 +55,7 @@ describe('reviewed new folders (R10)', () => {
     writeFileSync(join(rootDir, 'notes-c.txt'), 'eta theta iota\n', 'utf8');
     const organiser = new Organiser({ dbPath, rootPath: rootDir, stabilityWindowMs: 0 });
     const scanned = await organiser.scan();
+    await reviewScannedTaxonomy(organiser);
     await organiser.classify(undefined, 'rules');
 
     // Read the decisions through the repository on the same database: real

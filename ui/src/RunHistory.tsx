@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import type { JSX } from 'react';
 import type { ActionRow } from './App.js';
 
 export function RunHistory({ batchId }: { batchId: string }): JSX.Element {

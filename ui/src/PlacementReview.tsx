@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import type { JSX } from 'react';
 import type { Proposal } from './App.js';
 
 interface ClassifyResponse {

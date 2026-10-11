@@ -26,10 +26,10 @@ export const CLI_VERBS = [
   'undo',
   'resume',
   'status',
+  'taxonomy',
   'export',
   'eval:fixture',
   'doctor',
-  'review',
 ] as const;
 
 export type Verb = (typeof CLI_VERBS)[number];
@@ -147,6 +147,34 @@ export async function runCli(argv: readonly string[], options: CliOptions): Prom
       }
       case 'status': {
         print({ providers: await organiser.providerHealth() });
+        return 0;
+      }
+      case 'taxonomy': {
+        // Display the active taxonomy, its curation status and the discovered
+        // destination catalogue; `--review` approves the current tree through
+        // the same service the UI uses (spec review R9).
+        const taxonomy = organiser.getTaxonomy();
+        if (!taxonomy.ok) {
+          console.error(`${taxonomy.code}: ${taxonomy.detail}`);
+          return 1;
+        }
+        if (rest[0] === '--review') {
+          const mappings = taxonomy.value.tree
+            .filter((node) => node.destinationId !== null)
+            .map((node) => ({ categoryId: node.id, destinationId: node.destinationId as string }));
+          const reviewed = await organiser.replaceTaxonomy({
+            expectedRevision: taxonomy.value.revision,
+            tree: taxonomy.value.tree,
+            mappings,
+          });
+          if (!reviewed.ok) {
+            console.error(`${reviewed.code}: ${reviewed.detail}`);
+            return 1;
+          }
+          print({ reviewed: reviewed.value });
+          return 0;
+        }
+        print(taxonomy.value);
         return 0;
       }
       case 'export': {

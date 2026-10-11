@@ -77,6 +77,13 @@ describe('CLI — same service, no bypass', () => {
     const scanned = JSON.parse(scan.stdout) as { candidates: number };
     expect(scanned.candidates).toBe(2);
 
+    // The taxonomy is reviewed before classification (spec review R9): the
+    // scan's automatic tree is a starting point, never a routing authority.
+    const taxonomy = await run(['taxonomy'], env);
+    expect(taxonomy.exitCode).toBe(0);
+    const taxonomyReviewed = await run(['taxonomy', '--review'], env);
+    expect(taxonomyReviewed.exitCode).toBe(0);
+
     const classify = await run(['classify'], env);
     expect(classify.exitCode).toBe(0);
     const classified = JSON.parse(classify.stdout) as { proposals: number; deferred: number };
