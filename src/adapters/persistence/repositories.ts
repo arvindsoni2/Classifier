@@ -131,12 +131,19 @@ export interface Repositories {
   items: {
     save(item: Item, rootId: Id): void;
     listByRoot(rootId: Id): { item: Item; rootId: Id }[];
+    /** Records which items a scan batch actually observed (R12). */
+    addToBatch(batchId: Id, itemIds: Id[]): void;
+    listByBatch(batchId: Id): { item: Item; rootId: Id }[];
   };
   batches: {
     create(rootId: Id): Batch;
     get(id: Id): Batch | null;
     requestCancel(id: Id): void;
     listByRoot(rootId: Id): Batch[];
+    listAll(): Batch[];
+    /** Persists the exclusions a scan observed (R12). */
+    addExclusion(batchId: Id, reason: string): void;
+    exclusions(batchId: Id): string[];
   };
   proposals: {
     save(proposal: Proposal): void;
@@ -163,8 +170,11 @@ export interface Repositories {
     get(actionId: Id): ActionRecord | null;
     find(proposalId: Id, proposalVersion: Revision, mode: 'apply' | 'undo'): ActionRecord | null;
     listByApproval(approvalId: Id): ActionRecord[];
+    listByBatch(batchId: Id): ActionRecord[];
     update(actionId: Id, update: { state: string; receiptJson?: string | null }): void;
   };
+  /** Removes a retained batch and everything that references it (R12). */
+  purgeBatch(batchId: Id): void;
   decisions: {
     save(decision: DecisionRecord): void;
     listByRoot(rootId: Id): { decision: DecisionRecord; rootId: Id }[];
@@ -281,6 +291,20 @@ interface EventRow {
   recorded_at: string;
   payload_hash: string;
   payload_json: string | null;
+}
+
+function mapItemRow(row: ItemRow): Item {
+  return {
+    id: row.id,
+    sourceId: row.root_id,
+    sourceKind: 'filesystem',
+    externalId: row.external_id,
+    displayName: row.external_id,
+    revision: row.revision,
+    snapshot:
+      row.snapshot_json === null ? ({} as Snapshot) : (JSON.parse(row.snapshot_json) as Snapshot),
+    evidenceId: null,
+  };
 }
 
 function mapProposalRow(row: ProposalRow): Proposal {
@@ -454,6 +478,19 @@ export function createRepositories(dbPath: string): Repositories {
   const listItemsByRoot = db.prepare(
     'SELECT * FROM items WHERE root_id = ? ORDER BY rowid',
   );
+  const listItemsByBatch = db.prepare(
+    `SELECT i.* FROM items i JOIN batch_items b ON b.item_id = i.id
+     WHERE b.batch_id = ? ORDER BY i.rowid`,
+  );
+  const addBatchItem = db.prepare(
+    'INSERT OR IGNORE INTO batch_items (batch_id, item_id) VALUES (?, ?)',
+  );
+  const addBatchExclusion = db.prepare(
+    'INSERT INTO batch_exclusions (batch_id, reason) VALUES (?, ?)',
+  );
+  const listBatchExclusions = db.prepare(
+    'SELECT reason FROM batch_exclusions WHERE batch_id = ? ORDER BY rowid',
+  );
   const insertApproval = db.prepare(
     `INSERT INTO approvals (id, batch_id, action_set_hash, taxonomy_revision, policy_revision,
        selected_actions_json, expires_at, mode, pins_json)
@@ -472,6 +509,10 @@ export function createRepositories(dbPath: string): Repositories {
     'SELECT * FROM actions WHERE proposal_id = ? AND version = ? AND mode = ?',
   );
   const listActionsByApproval = db.prepare('SELECT * FROM actions WHERE approval_id = ?');
+  const listActionsByBatch = db.prepare(
+    `SELECT * FROM actions WHERE approval_id IN (SELECT id FROM approvals WHERE batch_id = ?) ORDER BY rowid`,
+  );
+  const listAllBatches = db.prepare('SELECT * FROM batches ORDER BY rowid');
   const updateAction = db.prepare(
     'UPDATE actions SET state = ?, receipt_json = COALESCE(?, receipt_json) WHERE id = ?',
   );
@@ -538,6 +579,13 @@ export function createRepositories(dbPath: string): Repositories {
       },
     },
     items: {
+      addToBatch(batchId, itemIds) {
+        for (const itemId of itemIds) addBatchItem.run(batchId, itemId);
+      },
+      listByBatch(batchId) {
+        const rows = listItemsByBatch.all(batchId) as ItemRow[];
+        return rows.map((row) => ({ item: mapItemRow(row), rootId: row.root_id }));
+      },
       save(item, rootId) {
         insertItem.run(
           item.id,
@@ -601,8 +649,30 @@ export function createRepositories(dbPath: string): Repositories {
           cancellationRequested: row.cancellation_requested !== 0,
         };
       },
+      addExclusion(batchId, reason) {
+        addBatchExclusion.run(batchId, reason);
+      },
+      exclusions(batchId) {
+        return (listBatchExclusions.all(batchId) as { reason: string }[]).map((row) => row.reason);
+      },
       requestCancel(id) {
         requestCancelBatch.run(id);
+      },
+      listAll() {
+        const rows = listAllBatches.all() as {
+          id: string;
+          root_id: string;
+          stage: string;
+          created_at: string;
+          cancellation_requested: number;
+        }[];
+        return rows.map((row) => ({
+          id: row.id,
+          rootId: row.root_id,
+          stage: row.stage,
+          createdAt: row.created_at,
+          cancellationRequested: row.cancellation_requested !== 0,
+        }));
       },
       listByRoot(rootId) {
         const rows = listBatchesByRoot.all(rootId) as {
@@ -737,6 +807,10 @@ export function createRepositories(dbPath: string): Repositories {
         const rows = listActionsByApproval.all(approvalId) as ActionRow[];
         return rows.map((row) => mapActionRow(row, []));
       },
+      listByBatch(batchId) {
+        const rows = listActionsByBatch.all(batchId) as ActionRow[];
+        return rows.map((row) => mapActionRow(row, getEvents.all(row.id) as EventRow[]));
+      },
       update(actionId, update) {
         updateAction.run(update.state, update.receiptJson ?? null, actionId);
       },
@@ -808,7 +882,24 @@ export function createRepositories(dbPath: string): Repositories {
       },
     },
     transaction,
-    close() {
+    purgeBatch(batchId) {
+      transaction(() => {
+        const actionIds = (
+          listActionsByBatch.all(batchId) as { id: string }[]
+        ).map((row) => row.id);
+        for (const actionId of actionIds) {
+          db.prepare('DELETE FROM action_events WHERE action_id = ?').run(actionId);
+        }
+        db.prepare(
+          'DELETE FROM actions WHERE approval_id IN (SELECT id FROM approvals WHERE batch_id = ?)',
+        ).run(batchId);
+        db.prepare('DELETE FROM approvals WHERE batch_id = ?').run(batchId);
+        db.prepare('DELETE FROM batch_items WHERE batch_id = ?').run(batchId);
+        db.prepare('DELETE FROM batch_exclusions WHERE batch_id = ?').run(batchId);
+        db.prepare('DELETE FROM writer_locks WHERE root_id = (SELECT root_id FROM batches WHERE id = ?)').run(batchId);
+        db.prepare('DELETE FROM batches WHERE id = ?').run(batchId);
+      });
+    },    close() {
       db.close();
     },
   };

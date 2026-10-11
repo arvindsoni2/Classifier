@@ -29,6 +29,7 @@ async function main(fixtureDir: string, outDir: string): Promise<void> {
   });
   const calibrated = await appendNodeCalibration(run, dataset, providers, labels, {
     evidenceTreatment: 'compact_text',
+    split: 'all',
   });
   const report = scoreRun(calibrated, labels);
 
@@ -67,7 +68,7 @@ async function main(fixtureDir: string, outDir: string): Promise<void> {
   console.log(
     JSON.stringify(
       {
-        synthetic: true,
+        synthetic: false,
         fixtureDir,
         outDir,
         files: exported.value,

@@ -36,7 +36,15 @@ function prediction(
     route:
       predictedCategoryId === null
         ? []
-        : [{ nodeId: 'root', questionId: 'q-root', selectedId: predictedCategoryId, probabilities: {} }],
+        : [
+            {
+              nodeId: 'root',
+              questionId: 'q-root',
+              selectedId: predictedCategoryId,
+              probabilities: {},
+              requestHash: 'a'.repeat(64),
+            },
+          ],
     error: status === 'failed' ? 'PROVIDER_FAILED: provider blocked' : null,
     elapsedMs: 1,
     tokenCounts: {},
@@ -94,7 +102,7 @@ function goldenRun(): EvalRun {
     splitSeed: 20261006,
     evidenceTreatment: 'metadata',
     split: 'all',
-    synthetic: true,
+    provenance: 'synthetic-fixture',
     predictions: [
       prediction('item-1', 'family-a', 'completed', 'cat-invoices'),
       prediction('item-2', 'family-a', 'completed', 'cat-invoices'),

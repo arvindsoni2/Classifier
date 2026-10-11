@@ -113,6 +113,19 @@ CREATE TABLE IF NOT EXISTS action_events (
   payload_json TEXT
 );
 
+-- Per-batch membership and observed exclusions (spec review R12): a batch
+-- classifies exactly the items it scanned, and every exclusion is auditable.
+CREATE TABLE IF NOT EXISTS batch_items (
+  batch_id TEXT NOT NULL REFERENCES batches(id),
+  item_id TEXT NOT NULL REFERENCES items(id),
+  PRIMARY KEY (batch_id, item_id)
+);
+
+CREATE TABLE IF NOT EXISTS batch_exclusions (
+  batch_id TEXT NOT NULL REFERENCES batches(id),
+  reason TEXT NOT NULL
+);
+
 -- Root-scoped writer lock (spec review R6): one apply/recovery/undo writer
 -- per root across every process, with stale takeover after a crash.
 CREATE TABLE IF NOT EXISTS writer_locks (

@@ -27,13 +27,22 @@ function jsonl(rows: readonly unknown[]): string {
 export function buildEvalManifest(
   run: EvalRun,
   labels: EvalLabels | null,
-  options: { consentId?: string | null; note?: string; includePrivateEvidence?: boolean } = {},
+  options: {
+    consentId?: string | null;
+    note?: string;
+    includePrivateEvidence?: boolean;
+    /** What the dataset actually is: 'synthetic-fixture' or a labelled set id. */
+    provenance?: string;
+  } = {},
 ): Record<string, unknown> {
   const cpuList = cpus();
+  // Provenance is honest (spec review R11): the dataset declares what it is;
+  // the manifest never claims "synthetic" for an arbitrary frozen dataset.
+  const synthetic = options.provenance ?? run.provenance ?? 'synthetic-fixture-or-frozen-dataset';
   return {
     schemaVersion: '1.0.0',
-    synthetic: true,
-    generatedFrom: 'synthetic-fixture-or-frozen-dataset',
+    synthetic,
+    generatedFrom: synthetic,
     datasetHash: run.datasetHash,
     taxonomyHash: run.taxonomyHash,
     policyHash: '(policy revision is recorded by the application service; synthetic fixture uses policy-v1)',
@@ -59,7 +68,7 @@ export function buildEvalManifest(
       cpus: cpuList.length,
       totalMemoryBytes: totalmem(),
       node: process.version,
-      synthetic: true,
+      synthetic,
     },
     notes: options.note
       ? [options.note]
@@ -136,7 +145,7 @@ export async function exportRun(
   writeFileSync(join(outDir, 'node_predictions.jsonl'), jsonl(run.nodePredictions));
   files.push('node_predictions.jsonl');
 
-  writeFileSync(join(outDir, 'run.json'), `${JSON.stringify({ ...run, synthetic: true }, null, 2)}\n`);
+  writeFileSync(join(outDir, 'run.json'), `${JSON.stringify({ ...run, synthetic: run.provenance }, null, 2)}\n`);
   files.push('run.json');
 
   // Private evidence is written ONLY under an explicit opt-in, into its own

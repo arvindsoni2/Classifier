@@ -27,6 +27,8 @@ export interface RouteStep {
   questionId: string;
   selectedId: string;
   probabilities: Record<string, number>;
+  /** sha256 of the exact fitted request (matched-input proof, R11). */
+  requestHash: string;
 }
 
 export interface PredictionRow {
@@ -76,7 +78,8 @@ export interface EvalRun {
   splitSeed: number;
   evidenceTreatment: 'metadata' | 'compact_text';
   split: SplitName | 'all';
-  synthetic: true;
+  /** What the dataset is: 'synthetic-fixture' or a labelled set id (R11). */
+  provenance: string;
   predictions: PredictionRow[];
   nodePredictions: NodePredictionRow[];
   providerRuns: ProviderRun[];
@@ -87,6 +90,8 @@ export interface EvalConfig {
   evidenceTreatment: 'metadata' | 'compact_text';
   /** Number of warmed timing repeats with identical inputs (default 3). */
   warmRepeats?: number;
+  /** What the dataset is: 'synthetic-fixture' or a labelled set id (R11). */
+  provenance?: string;
 }
 
 function sha256(input: string): string {
@@ -183,6 +188,16 @@ async function runRoute(
       };
     }
 
+    // The fitted request is hashed before dispatch: identical hashes across
+    // providers prove the matched treatment rather than asserting it.
+    const requestHash = sha256(
+      stableStringify({
+        evidence: request.value.evidence,
+        questions: request.value.questions,
+        schemaHash: request.value.schemaHash,
+        taxonomyRevision: request.value.taxonomyRevision,
+      }),
+    );
     const result = await provider.decide(request.value);
     if (!result.ok) {
       return {
@@ -207,7 +222,13 @@ async function runRoute(
         tokenCounts,
       };
     }
-    route.push({ nodeId: node.id, questionId: answer.questionId, selectedId: answer.selectedId, probabilities: answer.probabilities });
+    route.push({
+      nodeId: node.id,
+      questionId: answer.questionId,
+      selectedId: answer.selectedId,
+      probabilities: answer.probabilities,
+      requestHash,
+    });
 
     if (answer.selectedId === UNKNOWN_OPTION_ID) {
       // Unknown, malformed output, insufficient evidence or provider failure
@@ -261,48 +282,57 @@ export async function runEvaluation(
   const providerRuns: ProviderRun[] = [];
   const warmRepeats = config.warmRepeats ?? 3;
 
+  // Every comparison provider's manifest is loaded BEFORE any treatment runs:
+  // evidence is fitted to the tightest common budget so the inputs are
+  // actually matched, and the run records the request hash proving it.
+  const healthyProviders: { provider: DecisionProvider; manifest: ProviderManifest }[] = [];
   for (const provider of providers) {
-    const providerStarted = Date.now();
     const health = await provider.health();
+    if (health.ok) healthyProviders.push({ provider, manifest: health.value });
+  }
+  const commonManifests = healthyProviders.map((entry) => entry.manifest);
 
-    if (!health.ok) {
-      // Health failure blocks that provider's evaluation without dropping
-      // it from reported results: every item is a recorded failure.
-      const providerId = provider.providerId;
-      providerRuns.push({
+  // Providers whose health failed are reported as blocked with one recorded
+  // failure per item; the healthy ones run against the common budgets.
+  for (const provider of providers) {
+    if (healthyProviders.some((entry) => entry.provider === provider)) continue;
+    const providerId = provider.providerId;
+    const health = await provider.health();
+    providerRuns.push({
+      provider: providerId,
+      modelRevision: 'unknown',
+      runtimeRevision: 'unknown',
+      status: 'blocked',
+      manifest: null,
+      blockedDetail: `${health.ok ? 'blocked' : health.code}: ${health.ok ? 'provider unavailable' : health.detail}`,
+      elapsedTotalMs: 0,
+      warmedSamples: [],
+      warmRepeats: 0,
+    });
+    for (const item of items) {
+      predictions.push({
+        itemId: item.itemId,
+        familyId: item.familyId,
+        split: item.split,
         provider: providerId,
         modelRevision: 'unknown',
         runtimeRevision: 'unknown',
-        status: 'blocked',
-        manifest: null,
-        blockedDetail: `${health.code}: ${health.detail}`,
-        elapsedTotalMs: 0,
-        warmedSamples: [],
-        warmRepeats: 0,
+        evidenceProfile: config.evidenceTreatment,
+        status: 'failed',
+        predictedCategoryId: null,
+        predictedDestinationId: null,
+        route: [],
+        error: `provider blocked: ${health.ok ? 'provider unavailable' : `${health.code}: ${health.detail}`}`,
+        elapsedMs: 0,
+        tokenCounts: {},
       });
-      for (const item of items) {
-        predictions.push({
-          itemId: item.itemId,
-          familyId: item.familyId,
-          split: item.split,
-          provider: providerId,
-          modelRevision: 'unknown',
-          runtimeRevision: 'unknown',
-          evidenceProfile: config.evidenceTreatment,
-          status: 'failed',
-          predictedCategoryId: null,
-          predictedDestinationId: null,
-          route: [],
-          error: `provider blocked: ${health.code}: ${health.detail}`,
-          elapsedMs: 0,
-          tokenCounts: {},
-        });
-      }
-      continue;
     }
+  }
 
-    const manifest = health.value;
-    const manifests = [manifest];
+  for (const { provider, manifest } of healthyProviders) {
+    const providerStarted = Date.now();
+
+    const manifests = commonManifests;
     const warmedSamples: number[] = [];
 
     for (let warm = 0; warm < warmRepeats; warm++) {
@@ -355,7 +385,7 @@ export async function runEvaluation(
     splitSeed: dataset.manifest.splitSeed,
     evidenceTreatment: config.evidenceTreatment,
     split,
-    synthetic: true,
+    provenance: config.provenance ?? 'synthetic-fixture',
     predictions,
     nodePredictions: [],
     providerRuns,
@@ -374,17 +404,21 @@ export async function appendNodeCalibration(
   dataset: EvalDataset,
   providers: readonly DecisionProvider[],
   labels: EvalLabels,
-  options: { evidenceTreatment: EvalConfig['evidenceTreatment'] },
+  options: { evidenceTreatment: EvalConfig['evidenceTreatment']; split?: EvalConfig['split'] },
 ): Promise<EvalRun> {
   const nodePredictions = [...run.nodePredictions];
-  // Health is probed ONCE per provider, never per item×node.
+  // Health is probed ONCE per provider, never per item×node, and every
+  // provider is calibrated against the COMMON budget (spec review R11).
   const healthy: { provider: DecisionProvider; manifest: ProviderManifest }[] = [];
   for (const provider of providers) {
     const health = await provider.health();
     if (health.ok) healthy.push({ provider, manifest: health.value });
   }
+  const commonManifests = healthy.map((entry) => entry.manifest);
+  const split = options.split ?? 'all';
 
   for (const item of dataset.items) {
+    if (split !== 'all' && item.split !== split) continue;
     const label: EvalLabel | undefined = labels.labels[item.itemId];
     if (label === undefined) continue;
 
@@ -406,7 +440,7 @@ export async function appendNodeCalibration(
       const children = childrenOf(dataset.taxonomy.tree, node.id);
 
       for (const { provider, manifest } of healthy) {
-        const request = buildMatchedRequest(treatEvidence(item.evidence, options.evidenceTreatment), { category: node, children }, [manifest]);
+        const request = buildMatchedRequest(treatEvidence(item.evidence, options.evidenceTreatment), { category: node, children }, commonManifests);
         if (!request.ok) continue;
         const result = await provider.decide(request.value);
         if (!result.ok) continue;

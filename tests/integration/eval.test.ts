@@ -221,8 +221,14 @@ describe('exports and scoring', () => {
     const items = readFileSync(join(outDir, 'items.jsonl'), 'utf8');
     expect(items).not.toContain('compactText');
     expect(items).not.toContain('Invoice for infrastructure');
-    const manifest = JSON.parse(readFileSync(join(outDir, 'manifest.json'), 'utf8')) as { synthetic: boolean };
-    expect(manifest.synthetic).toBe(true);
+    const manifest = JSON.parse(readFileSync(join(outDir, 'manifest.json'), 'utf8')) as {
+      synthetic: string | boolean;
+      generatedFrom: string;
+    };
+    // Provenance is honest: the fixture declares itself, never "synthetic"
+    // for an arbitrary dataset (spec review R11).
+    expect(manifest.synthetic).toBe('synthetic-fixture');
+    expect(manifest.generatedFrom).toBe('synthetic-fixture');
 
     // The opt-in path writes a clearly named private file — and only then.
     const optInDir = mkdtempSync(join(tmpdir(), 'eval-export-private-'));

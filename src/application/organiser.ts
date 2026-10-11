@@ -256,14 +256,21 @@ export class Organiser {
     const batch = this.repositories.batches.create(root.rootId);
     let candidates = 0;
     let deferred = 0;
+    const scannedItemIds: Id[] = [];
     for await (const result of this.source.discover(root)) {
       if (result.ok) {
         candidates += 1;
         this.repositories.items.save(result.value, root.rootId);
+        scannedItemIds.push(result.value.id);
       } else {
         deferred += 1;
+        // Every exclusion is persisted with its reason (spec review R12).
+        this.repositories.batches.addExclusion(batch.id, result.detail);
       }
     }
+    // Per-batch membership: a later classification run classifies what THIS
+    // scan observed, not every historic revision under the root.
+    this.repositories.items.addToBatch(batch.id, scannedItemIds);
     this.rebuildTaxonomy();
     return { batchId: batch.id, rootId: root.rootId, candidates, deferred, directories: directories.value.length };
   }
@@ -321,7 +328,7 @@ export class Organiser {
     const provider = this.providers.find((entry) => entry.providerId === providerId);
     if (provider === undefined) throw new Error(`provider ${providerId} is not configured`);
 
-    const items = this.itemsForRoot(root.rootId);
+    const items = this.itemsForBatch(batch);
     let proposals = 0;
     const deferredItems: string[] = [];
     /** Scope/identity refusals surfaced as visible conflicts (spec review R3). */
@@ -493,30 +500,14 @@ export class Organiser {
   }
 
   private itemsForBatch(batch: Id): Item[] {
-    const items: Item[] = [];
     const batchRow = this.repositories.batches.get(batch);
     if (batchRow === null) return [];
-    for (const approval of this.repositories.approvals.listByBatch(batch)) {
-      for (const action of this.repositories.actions.listByApproval(approval.id)) {
-        const proposal = this.repositories.proposals.get(action.proposalId);
-        if (proposal !== null) {
-          const existing = items.find((item) => item.id === proposal.itemId);
-          if (existing === undefined) {
-            items.push({
-              id: proposal.itemId,
-              sourceId: batchRow.rootId,
-              sourceKind: 'filesystem',
-              externalId: proposal.basename,
-              displayName: proposal.basename,
-              revision: '1',
-              snapshot: proposal.expected,
-              evidenceId: null,
-            });
-          }
-        }
-      }
+    const rows = this.repositories.items.listByBatch(batch);
+    if (rows.length > 0) {
+      return rows.map((entry) => ({ ...entry.item, sourceKind: 'filesystem' as const }));
     }
-    return items;
+    // Pre-membership batches (older databases) fall back to the root's items.
+    return this.itemsForRoot(batchRow.rootId);
   }
 
   async listProposals(
@@ -920,7 +911,15 @@ export class Organiser {
     return validateApproval(approvalContract, context, this.clock()).ok;
   }
 
+  /** Read-only repository access for the export surface (R12). */
+  repositoriesForExport(): Repositories {
+    return this.repositories;
+  }
+
   close(): void {
+    // Provider sessions (e.g. the Laya ONNX runtime) are released with the
+    // application, not leaked per verb (spec review R11).
+    for (const provider of this.providers) void provider.close().catch(() => undefined);
     this.repositories.close();
   }
 }

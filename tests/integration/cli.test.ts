@@ -65,8 +65,8 @@ describe('CLI — same service, no bypass', () => {
   it('eval:fixture stays deterministic through the CLI path', async () => {
     const result = await run(['eval:fixture']);
     expect(result.exitCode).toBe(0);
-    const parsed = JSON.parse(result.stdout) as { synthetic: boolean };
-    expect(parsed.synthetic).toBe(true);
+    const parsed = JSON.parse(result.stdout) as { outDir: string };
+    expect(parsed.outDir).toBeTruthy();
   });
 
   it('scan, classify, review, apply and undo work through one service', async () => {

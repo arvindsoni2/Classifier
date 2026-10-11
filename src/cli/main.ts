@@ -178,6 +178,26 @@ export async function runCli(argv: readonly string[], options: CliOptions): Prom
         return 0;
       }
       case 'export': {
+        // `export --batch <id>` exports a live batch's own run; the default
+        // path stays the frozen synthetic fixture (spec review R12).
+        const batchFlag = rest.indexOf('--batch');
+        if (batchFlag >= 0) {
+          const batchId = rest[batchFlag + 1];
+          if (batchId === undefined) {
+            console.error('export --batch requires a batch id');
+            return 2;
+          }
+          const { exportLiveBatch } = await import('../eval/live-export.js');
+          const exported = exportLiveBatch(organiser.repositoriesForExport(), batchId, rest[0] ?? 'build/export', {
+            includePrivateEvidence: rest.includes('--private'),
+          });
+          if (!exported.ok) {
+            console.error(`${exported.code}: ${exported.detail}`);
+            return 1;
+          }
+          print(exported.value);
+          return 0;
+        }
         const outDir = rest[0] ?? 'build/export';
         const { exportRun, writeReport } = await import('../eval/report.js');
         const { scoreRun } = await import('../eval/metrics.js');
