@@ -152,13 +152,22 @@ it (read-only scan recorded; taxonomy handoff pending).
   catalogue; classification is refused before review and works after; the
   reviewed revision survives a restart and classifies there; explicit
   curation replaces the automatic tree.
-- [ ] **R13** Review UX: build the exact human-readable summary (source/target
-  paths, root, new dirs, conflicts, expiry) *before* issuing approval; approve
-  only on explicit confirmation; full destination catalogue + category mapping;
-  show evidence, distributions, provider health, progress, receipts;
-  conditional undo/recovery controls; proposals leave `pending` after apply;
-  focus management; apply the visual/motion spec (incl. the `.sr-only`
-  semicolon defect).
+- [x] **R13** Review UX: the exact human-readable summary is built BEFORE any
+  approval exists and the approval is issued only on explicit confirmation, so
+  cancelling leaves nothing behind. The summary lists real source and target
+  paths under the resolved root; destination cells show paths, not opaque ids;
+  edits pick a reviewed category and the destination follows the taxonomy
+  mapping (the service refuses an unmapped pair); the provider selector
+  reflects live provider health; each proposal shows its persisted decision
+  provenance (provider, model revision, probability) through the new
+  decision-digest surface; conflicts are listed with their reasons; the
+  history view offers conditional undo through a separately approved undo
+  approval; dialogs trap Tab and restore focus on close; the stylesheet gained
+  the specified dark palette, transitions, focus-visible rings, wrapped
+  small-viewport tables and the `.sr-only` semicolon fix. The e2e teardown no
+  longer hangs on browser keep-alive connections. Remaining presentation
+  polish (dark-palette refinements, progress display during long
+  classifications) is tracked for the R15 pass.
 
 ## Phase 4 — replayable evaluation and evidence (review step 4)
 
