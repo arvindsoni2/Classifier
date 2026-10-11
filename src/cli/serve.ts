@@ -5,14 +5,19 @@
 import type { CliOptions } from './main.js';
 import type { Organiser } from '../application/organiser.js';
 import { buildServer as createServer, type OrganiserServer } from '../http/server.js';
+import { assertBuiltUi, resolveDefaultUiDist } from '../http/assets.js';
 
 export async function serveReview(
   options: CliOptions,
   organiserFor: (options: CliOptions) => Organiser,
   port = Number.parseInt(options.env.ORGANISER_PORT ?? '4317', 10),
+  uiDist: string = resolveDefaultUiDist(),
 ): Promise<OrganiserServer> {
+  // Fail before touching the database when the built UI is missing (R8): a
+  // silent 404 on /app/login.js degrades the login form to a bare submit.
+  assertBuiltUi(uiDist);
   const organiser = organiserFor(options);
-  const server: OrganiserServer = createServer(organiser, { port, host: '127.0.0.1' });
+  const server: OrganiserServer = createServer(organiser, { port, host: '127.0.0.1', uiDist });
   await server.listen();
   const address = server.addresses()[0];
   const bound = typeof address === 'object' && address !== null ? address.port : port;

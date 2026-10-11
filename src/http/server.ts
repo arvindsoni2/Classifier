@@ -8,6 +8,7 @@ import Fastify, { type FastifyInstance, type FastifyListenOptions } from 'fastif
 import { existsSync } from 'node:fs';
 import { createSessionStore, type SessionConfig } from './session.js';
 import { registerRoutes, type ApplicationService } from './routes.js';
+import { assertBuiltUi, registerUiAssets } from './assets.js';
 
 export type { ApplicationService } from './routes.js';
 export { type SessionConfig, DEFAULT_PORT } from './session.js';
@@ -17,10 +18,18 @@ export interface OrganiserServer extends FastifyInstance {
   bootstrapToken: string;
 }
 
+export interface ServerConfig extends SessionConfig {
+  /**
+   * Directory of the built UI served under `/app/`. Shared with the E2E
+   * factory so production and tests register assets through one path (R8).
+   */
+  uiDist?: string;
+}
+
 /** Builds the authenticated loopback server without binding it. */
 export function buildServer(
   service: ApplicationService,
-  config: SessionConfig = {},
+  config: ServerConfig = {},
 ): OrganiserServer {
   const host = config.host ?? '127.0.0.1';
   const port = config.port ?? 4317;
@@ -32,6 +41,21 @@ export function buildServer(
     trustProxy: false,
   }) as unknown as OrganiserServer;
 
+  // The login form's no-JS fallback submits application/x-www-form-urlencoded.
+  // Without this parser that legitimate path answers an opaque 415; the token
+  // payload shape is unchanged, so the bootstrap-token check still applies.
+  app.addContentTypeParser(
+    'application/x-www-form-urlencoded',
+    { parseAs: 'string' },
+    (request, body, done) => {
+      try {
+        done(null, Object.fromEntries(new URLSearchParams(body as string).entries()));
+      } catch (error) {
+        done(error as Error, undefined);
+      }
+    },
+  );
+
   const sessionStore = createSessionStore(config);
 
   const boundPort = (): number | null => {
@@ -40,6 +64,12 @@ export function buildServer(
   };
 
   registerRoutes(app, { service, sessionStore, sessionLifetimeMs, boundPort });
+
+  // Shared UI asset registration (R8): production serves exactly what E2E does.
+  if (config.uiDist !== undefined) {
+    assertBuiltUi(config.uiDist);
+    registerUiAssets(app, config.uiDist);
+  }
   app.bootstrapToken = sessionStore.bootstrapToken;
 
   // Loopback only: a public bind is never allowed, occupied ports fail loudly
@@ -75,8 +105,7 @@ export async function createServerForE2E(options: {
   });
   const uiDist = options.uiDist;
   if (uiDist !== undefined && existsSync(uiDist)) {
-    const { default: fastifyStatic } = await import('@fastify/static');
-    await server.register(fastifyStatic, { root: uiDist, prefix: '/app/' });
+    registerUiAssets(server, uiDist);
   }
   return server;
 }
