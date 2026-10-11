@@ -49,7 +49,7 @@ describe('classification scope (R3)', () => {
     expect(result.conflicts?.some((entry) => /symlink/i.test(entry.reason))).toBe(true);
     // The private content never became evidence or a decision.
     const proposals = await organiser.listProposals();
-    expect(proposals.ok && proposals.value).toHaveLength(0);
+    expect(proposals.ok && proposals.value.proposals).toHaveLength(0);
     organiser.close();
   }, 60_000);
 
@@ -69,7 +69,7 @@ describe('classification scope (R3)', () => {
     expect(result.proposals).toBe(0);
     expect(result.conflicts?.map((entry) => entry.basename)).toContain('invoice-02.txt');
     const proposals = await organiser.listProposals();
-    expect(proposals.ok && proposals.value).toHaveLength(0);
+    expect(proposals.ok && proposals.value.proposals).toHaveLength(0);
     organiser.close();
   }, 60_000);
 

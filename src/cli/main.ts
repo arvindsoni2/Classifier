@@ -84,7 +84,7 @@ export async function runCli(argv: readonly string[], options: CliOptions): Prom
           return 1;
         }
         print({
-          proposals: listed.value.map((proposal) => ({
+          proposals: listed.value.proposals.map((proposal) => ({
             id: proposal.id,
             basename: proposal.basename,
             destinationId: proposal.destinationId,

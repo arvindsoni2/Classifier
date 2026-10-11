@@ -56,6 +56,17 @@ export interface ScanResult {
   directories: number;
 }
 
+/** A persisted decision's provenance, for the review surface (R13). */
+export interface DecisionDigest {
+  id: Id;
+  provider: string;
+  modelRevision: string;
+  selectedId: string;
+  probability: number | null;
+  elapsedMs: number;
+  tokenCounts: Decision['tokenCounts'];
+}
+
 export interface ClassifyResult {
   batchId: Id;
   proposals: number;
@@ -508,20 +519,55 @@ export class Organiser {
     return items;
   }
 
-  async listProposals(batchId?: Id): Promise<Result<Proposal[]>> {
+  async listProposals(
+    batchId?: Id,
+  ): Promise<Result<{ proposals: Proposal[]; decisions: Record<Id, DecisionDigest> }>> {
+    let rootId: Id | null = null;
     if (batchId !== undefined) {
       const batch = this.repositories.batches.get(batchId);
       if (batch === null) {
         return { ok: false, code: 'OUT_OF_SCOPE', detail: `unknown batch ${batchId}` };
       }
-      return ok(this.repositories.proposals.listByRoot(batch.rootId));
+      rootId = batch.rootId;
+    } else {
+      await this.ensureRoot();
+      const batch = this.currentBatch();
+      if (batch === null) {
+        return { ok: false, code: 'OUT_OF_SCOPE', detail: 'no batch available; run scan first' };
+      }
+      rootId = batch.rootId;
     }
-    await this.ensureRoot();
-    const batch = this.currentBatch();
-    if (batch === null) {
-      return { ok: false, code: 'OUT_OF_SCOPE', detail: 'no batch available; run scan first' };
+    const proposals = this.repositories.proposals.listByRoot(rootId);
+    // The persisted provider decisions are surfaced with their real
+    // provenance so the review can inspect evidence, not just a destination
+    // (spec review R13/R12).
+    const decisions: Record<Id, DecisionDigest> = {};
+    const itemsById = new Map(
+      this.repositories.items.listByRoot(rootId).map((row) => [row.item.id, row.item.id]),
+    );
+    const decisionRows = this.repositories.decisions
+      .listByRoot(rootId)
+      .map((row) => ({ id: row.decision.id, itemId: row.decision.itemId, record: row.decision }));
+    for (const proposal of proposals) {
+      if (!itemsById.has(proposal.itemId)) continue;
+      for (const decisionId of proposal.decisionIds) {
+        const row = decisionRows.find((entry) => entry.id === decisionId && entry.itemId === proposal.itemId);
+        if (row === undefined) continue;
+        const answers = JSON.parse(row.record.answersJson) as Decision['answers'];
+        const answer = answers[answers.length - 1];
+        const selectedId = answer?.selectedId ?? '';
+        decisions[proposal.id] = {
+          id: row.id,
+          provider: row.record.provider,
+          modelRevision: row.record.modelRevision,
+          selectedId,
+          probability: answer === undefined ? null : (answer.probabilities[selectedId] ?? null),
+          elapsedMs: row.record.elapsedMs,
+          tokenCounts: JSON.parse(row.record.tokenCountsJson) as Decision['tokenCounts'],
+        };
+      }
     }
-    return ok(this.repositories.proposals.listByRoot(batch.rootId));
+    return ok({ proposals, decisions });
   }
 
   patchProposal(proposalId: Id, patch: { expectedVersion: Revision; categoryId?: Id; destinationId?: Id; reject?: boolean }): Promise<Result<Proposal>> {
@@ -538,6 +584,19 @@ export class Organiser {
     };
     if (patch.categoryId !== undefined) patchInput.categoryId = patch.categoryId;
     if (patch.destinationId !== undefined) patchInput.destinationId = patch.destinationId;
+    // The reviewed taxonomy owns the category → destination mapping: an edit
+    // may not bind a category to a destination the taxonomy does not map
+    // (spec review R13).
+    const categoryId = patchInput.categoryId ?? proposal.categoryId;
+    const destinationId = patchInput.destinationId ?? proposal.destinationId;
+    const category = this.taxonomy.tree.find((entry) => entry.id === categoryId);
+    if (category === undefined || category.destinationId !== destinationId) {
+      return Promise.resolve({
+        ok: false as const,
+        code: 'INVALID_DECISION' as const,
+        detail: `category ${categoryId} is not mapped to destination ${destinationId} by the reviewed taxonomy`,
+      });
+    }
     const updated = patchProposal(proposal, patchInput);
     if (updated.ok) this.repositories.proposals.save(updated.value);
     return Promise.resolve(updated);
@@ -558,7 +617,7 @@ export class Organiser {
 
   private async pendingProposals(batchId: Id): Promise<{ proposalId: Id; version: Revision }[]> {
     const listed = await this.listProposals(batchId);
-    const rows = listed.ok ? listed.value : [];
+    const rows = listed.ok ? listed.value.proposals : [];
     return rows
       .filter((proposal) => proposal.state === 'pending')
       .map((proposal) => ({ proposalId: proposal.id, version: proposal.version }));
@@ -720,6 +779,8 @@ export class Organiser {
     status: { state: 'ok' } | { state: 'curation_required'; reason: string };
     reviewed: boolean;
     destinations: { id: Id; segments: string[] }[];
+    /** The resolved organisation root, for readable target paths (R13). */
+    root: string;
   }> {
     return ok({
       revision: this.taxonomy.revision,
@@ -732,6 +793,7 @@ export class Organiser {
         id: destination.id,
         segments: destination.segments,
       })),
+      root: this.root?.absolutePath ?? '',
     });
   }
 
@@ -786,6 +848,7 @@ export class Organiser {
         rows.push({
           actionId: record.id,
           proposalId: record.proposalId,
+          proposalVersion: record.proposalVersion,
           state: record.state,
           mode: record.mode,
           events: record.events.length > 0 ? record.events : this.repositories.actions.get(record.id)?.events ?? [],

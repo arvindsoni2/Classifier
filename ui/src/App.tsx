@@ -8,6 +8,7 @@ export interface Proposal {
   id: string;
   basename: string;
   destinationId: string;
+  categoryId: string;
   version: number;
   state: 'pending' | 'approved' | 'stale' | 'rejected';
 }
@@ -21,9 +22,15 @@ export interface TaxonomyNode {
   parentId: string | null;
 }
 
+export interface DestinationRef {
+  id: string;
+  segments: string[];
+}
+
 export interface ActionRow {
   actionId: string;
   proposalId: string;
+  proposalVersion: number;
   state: string;
   mode: string;
   events: { event: string; recordedAt: string }[];
@@ -48,8 +55,13 @@ async function api<T>(path: string, init?: RequestInit): Promise<{ ok: true; val
 
 export function App(): JSX.Element {
   const [view, setView] = useState<'taxonomy' | 'placements' | 'history'>('placements');
+  useEffect(() => {
+    void refreshCatalogue();
+  }, [view]);
   const [batchId, setBatchId] = useState<string | null>(null);
   const [scanError, setScanError] = useState<string | null>(null);
+  const [destinations, setDestinations] = useState<DestinationRef[]>([]);
+  const [rootPath, setRootPath] = useState('~');
 
   const scan = async (): Promise<void> => {
     setScanError(null);
@@ -57,12 +69,30 @@ export function App(): JSX.Element {
       method: 'POST',
       body: JSON.stringify({ rootId: '' }),
     });
-    if (result.ok) setBatchId(result.value.batch.batchId);
-    else setScanError(result.detail);
+    if (result.ok) {
+      setBatchId(result.value.batch.batchId);
+      void refreshCatalogue();
+    } else setScanError(result.detail);
+  };
+
+  // The destination catalogue and root come from the taxonomy surface so the
+  // placement view can show real target paths; they only exist after a scan.
+  const refreshCatalogue = async (): Promise<void> => {
+    const response = await fetch('/api/taxonomy', { credentials: 'same-origin' });
+    if (!response.ok) return;
+    const body = (await response.json().catch(() => null)) as {
+      destinations?: DestinationRef[];
+      reviewed?: boolean;
+      root?: string;
+    } | null;
+    if (body === null) return;
+    if (Array.isArray(body.destinations)) setDestinations(body.destinations);
+    if (typeof body.root === 'string' && body.root.length > 0) setRootPath(body.root);
   };
 
   useEffect(() => {
-    void api('/api/providers').then(() => undefined);
+    void api<{ providers: unknown }>('/api/providers').then(() => undefined);
+    void refreshCatalogue();
   }, []);
 
   return (
@@ -99,7 +129,7 @@ export function App(): JSX.Element {
         ) : view === 'taxonomy' ? (
           <TaxonomyReview />
         ) : view === 'placements' ? (
-          <PlacementReview batchId={batchId} />
+          <PlacementReview batchId={batchId} destinations={destinations} rootPath={rootPath} />
         ) : (
           <RunHistory batchId={batchId} />
         )}

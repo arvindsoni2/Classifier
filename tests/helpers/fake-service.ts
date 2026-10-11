@@ -28,7 +28,7 @@ export class FakeService implements ApplicationService {
     return { ok: true, value: { revision: 2, mappingHash: 'd'.repeat(64) } };
   }
 
-  async listProposals(batchId: string): Promise<Result<Proposal[]>> {
+  async listProposals(batchId: string): Promise<Result<{ proposals: Proposal[]; decisions: Record<string, unknown> }>> {
     this.calls.push({ method: 'listProposals', args: [batchId] });
     // Hostile-looking names are DATA the UI must escape, never instructions.
     const hostile: Proposal = {
@@ -51,7 +51,7 @@ export class FakeService implements ApplicationService {
       decisionIds: ['decision-1'],
       state: 'pending',
     };
-    return { ok: true, value: [hostile] };
+    return { ok: true, value: { proposals: [hostile], decisions: {} } };
   }
 
   async patchProposal(proposalId: string, body: unknown): Promise<Result<Proposal>> {
@@ -61,9 +61,9 @@ export class FakeService implements ApplicationService {
       this.failNext = null;
       return { ok: false, ...failure };
     }
-    const proposals = await this.listProposals('batch-1');
-    if (!proposals.ok) return proposals;
-    const base = proposals.value[0]!;
+    const listed = await this.listProposals('batch-1');
+    if (!listed.ok) return listed;
+    const base = listed.value.proposals[0]!;
     return { ok: true, value: { ...base, version: base.version + 1, categoryId: (body as { categoryId?: string }).categoryId ?? base.categoryId } };
   }
 

@@ -225,7 +225,10 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     const { id } = request.params as { id: string };
     const result = await service.listProposals(id);
     if (!result.ok) return sendError(reply, statusForError(result.code), result.code, result.detail);
-    return reply.send({ proposals: result.value });
+    // The concrete service returns { proposals, decisions }: the decision
+    // digests give the review surface its evidence provenance (R13).
+    const value = result.value as { proposals: unknown; decisions: unknown };
+    return reply.send(value);
   });
 
   app.patch('/api/proposals/:id', async (request, reply) => {

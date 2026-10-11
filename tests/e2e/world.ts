@@ -51,7 +51,14 @@ export async function startWorld(files: Record<string, string> = {
     baseUrl: `http://127.0.0.1:${port}`,
     bootstrapToken: handle.bootstrapToken,
     async close() {
-      await handle.close();
+      // A still-open browser page holds a keep-alive connection that keeps
+      // Fastify's close() pending; force the connections closed so teardown is
+      // deterministic regardless of test order.
+      handle.server.closeAllConnections?.();
+      await Promise.race([
+        handle.close(),
+        new Promise((resolve) => setTimeout(resolve, 5_000)),
+      ]);
       rmSync(dir, { recursive: true, force: true });
     },
   };

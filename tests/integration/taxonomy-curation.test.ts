@@ -111,7 +111,7 @@ describe('taxonomy curation (R9)', () => {
     const classified = await organiser.classify(undefined, 'rules');
     expect(classified.proposals).toBe(1);
     const proposals = await organiser.listProposals();
-    expect(proposals.ok && proposals.value[0]?.destinationId).toBe(invoices?.id);
+    expect(proposals.ok && proposals.value.proposals[0]?.destinationId).toBe(invoices?.id);
     organiser.close();
   }, 60_000);
 });
