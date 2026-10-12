@@ -38,11 +38,15 @@ export function buildEvalManifest(
   const cpuList = cpus();
   // Provenance is honest (spec review R11): the dataset declares what it is;
   // the manifest never claims "synthetic" for an arbitrary frozen dataset.
-  const synthetic = options.provenance ?? run.provenance ?? 'synthetic-fixture-or-frozen-dataset';
+  const provenance = options.provenance ?? run.provenance ?? 'synthetic-fixture';
+  // Boolean and string kept SEPARATE and consistent (spec review F12):
+  // `synthetic` is a fact about the dataset, `provenance` describes it.
+  const synthetic = provenance === 'synthetic-fixture';
   return {
     schemaVersion: '1.0.0',
     synthetic,
-    generatedFrom: synthetic,
+    provenance,
+    generatedFrom: provenance,
     datasetHash: run.datasetHash,
     taxonomyHash: run.taxonomyHash,
     policyHash: '(policy revision is recorded by the application service; synthetic fixture uses policy-v1)',
@@ -145,7 +149,14 @@ export async function exportRun(
   writeFileSync(join(outDir, 'node_predictions.jsonl'), jsonl(run.nodePredictions));
   files.push('node_predictions.jsonl');
 
-  writeFileSync(join(outDir, 'run.json'), `${JSON.stringify({ ...run, synthetic: run.provenance }, null, 2)}\n`);
+  writeFileSync(
+    join(outDir, 'run.json'),
+    `${JSON.stringify(
+      { ...run, provenance: run.provenance, synthetic: run.provenance === 'synthetic-fixture' },
+      null,
+      2,
+    )}\n`,
+  );
   files.push('run.json');
 
   // Private evidence is written ONLY under an explicit opt-in, into its own

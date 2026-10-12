@@ -222,12 +222,14 @@ describe('exports and scoring', () => {
     expect(items).not.toContain('compactText');
     expect(items).not.toContain('Invoice for infrastructure');
     const manifest = JSON.parse(readFileSync(join(outDir, 'manifest.json'), 'utf8')) as {
-      synthetic: string | boolean;
+      synthetic: boolean;
+      provenance: string;
       generatedFrom: string;
     };
-    // Provenance is honest: the fixture declares itself, never "synthetic"
-    // for an arbitrary dataset (spec review R11).
-    expect(manifest.synthetic).toBe('synthetic-fixture');
+    // F12: boolean and string are SEPARATE and consistent. The fixture is
+    // synthetic by construction; the provenance string describes it.
+    expect(manifest.synthetic).toBe(true);
+    expect(manifest.provenance).toBe('synthetic-fixture');
     expect(manifest.generatedFrom).toBe('synthetic-fixture');
 
     // The opt-in path writes a clearly named private file — and only then.

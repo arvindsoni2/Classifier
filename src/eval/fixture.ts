@@ -27,9 +27,9 @@ async function main(fixtureDir: string, outDir: string): Promise<void> {
     evidenceTreatment: 'compact_text',
     warmRepeats: 3,
   });
+  // No explicit split: calibration cohorts derive from the run (F12).
   const calibrated = await appendNodeCalibration(run, dataset, providers, labels, {
     evidenceTreatment: 'compact_text',
-    split: 'all',
   });
   const report = scoreRun(calibrated, labels);
 
@@ -68,7 +68,10 @@ async function main(fixtureDir: string, outDir: string): Promise<void> {
   console.log(
     JSON.stringify(
       {
-        synthetic: false,
+        // The fixture is synthetic BY CONSTRUCTION (spec review F12): the
+        // summary states it truthfully, matching the manifest.
+        synthetic: true,
+        provenance: 'synthetic-fixture',
         fixtureDir,
         outDir,
         files: exported.value,

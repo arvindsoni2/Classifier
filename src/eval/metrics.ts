@@ -165,7 +165,10 @@ export interface ProviderReport {
 }
 
 export interface EvalReport {
-  synthetic: true;
+  /** Fact about the dataset (F12): true only for the synthetic fixture. */
+  synthetic: boolean;
+  /** What the dataset actually is: 'synthetic-fixture' or a labelled set id. */
+  provenance: string;
   split: string;
   evidenceTreatment: string;
   datasetHash: string;
@@ -397,7 +400,8 @@ export function scoreRun(run: EvalRun, labels: EvalLabels): EvalReport {
   }
 
   return {
-    synthetic: true,
+    synthetic: run.provenance === 'synthetic-fixture',
+    provenance: run.provenance,
     split: run.split,
     evidenceTreatment: run.evidenceTreatment,
     datasetHash: run.datasetHash,

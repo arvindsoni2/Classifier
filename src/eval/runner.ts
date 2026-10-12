@@ -415,7 +415,9 @@ export async function appendNodeCalibration(
     if (health.ok) healthy.push({ provider, manifest: health.value });
   }
   const commonManifests = healthy.map((entry) => entry.manifest);
-  const split = options.split ?? 'all';
+  // Calibration cohorts follow the RUN's split unless a caller asks otherwise
+  // (spec review F12): a test-split run must not calibrate on all data.
+  const split = options.split ?? run.split;
 
   for (const item of dataset.items) {
     if (split !== 'all' && item.split !== split) continue;
