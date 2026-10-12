@@ -1470,17 +1470,13 @@ export class ApplicationService {
   }
 
   /**
-   * Creates one approved new folder segment and records a reviewed
-   * candidate group (FR-06): no proposal targets a candidate until the
-   * group is accepted, and the directory already exists until then only if
-   * the user asked for it.
-   */
-  /**
-   * Proposes a reviewed new folder (spec review R10). The physical directory
-   * is NOT created here: this persists a logical candidate bound to the real
-   * parent destination identity, and approved execution materialises it later.
-   * The old behaviour mkdir'd immediately with a fabricated root inode as the
-   * parent pin, which bypassed the approval workflow entirely.
+   * Proposes a reviewed new folder (spec review R10/F9). The physical
+   * directory is NOT created here — and in this release it is NOT created
+   * anywhere: approved execution moves files only into EXISTING discovered
+   * destinations, so FR-06's accept → materialise → move workflow remains
+   * OPEN (docs/Correction-Plan-2026-10-12.md, pending section). The old
+   * behaviour mkdir'd immediately with a fabricated root inode as the parent
+   * pin, bypassing approval entirely; that path is gone.
    */
   proposeFolder(
     parentSegments: readonly string[],

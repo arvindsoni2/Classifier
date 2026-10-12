@@ -70,19 +70,29 @@ section below — a checked box never covers a missing feature.
 
 ## Phase 4 — Scope decisions and evaluations (F9, F12)
 
-- [ ] **F9** New-folder execution stays open as a feature: the release is
-  explicitly narrowed to existing destinations; correction plan and release
-  evidence state FR-06 is not complete; no checked box claims it.
-- [ ] **F12** Provenance separated from the boolean `synthetic` flag
+- [x] **F9** New-folder execution stays open as a feature: the release is
+  explicitly narrowed to existing destinations; release evidence, the README
+  and the proposeFolder docs all state FR-06 materialisation is NOT
+  implemented; the R7–R15 boxes in the 10-11 plan carry a re-audit banner.
+- [x] **F12** Provenance separated from the boolean `synthetic` flag
   consistently across manifest/report/run.json; the fixture prints
   `synthetic: true`; node calibration defaults to the run's split.
 
 ## Phase 5 — Release evidence (F11)
 
-- [ ] **F11** CI action ref fixed (`pnpm/action-setup@v4`); hostile-filename
-  e2e test scans and asserts unconditionally; responsive test exercises the
-  placements view; E2E TypeScript included in the required typecheck; real
-  process-death lock test (child SIGKILLed, expiry reacquire).
+- [x] **F11** CI action ref fixed (`pnpm/action-setup@v4` with the version
+  pinned through package.json's `packageManager`), plus a cargo release build
+  step so the e2e flow can drive the real helper binary. E2E TypeScript is now
+  part of the required `pnpm typecheck` (tsconfig.e2e.json). The
+  hostile-filename browser test scans, classifies and asserts the shell-like
+  name UNCONDITIONALLY (plus no injected script node); the responsive test
+  measures overflow only AFTER scan → taxonomy review → classification
+  populate the view. Recovery is now proven against REAL process death twice:
+  the lock-lease test spawns a child, SIGKILLs it and only then reacquires
+  (dead-holder expiry, not clock tricks), and the new process-death test has a
+  child writer process die after a real rename and before any commit — a
+  restarted service reconciles the non-terminal journal to Applied with zero
+  second syscalls.
 
 ## Explicitly pending (not claimed done)
 

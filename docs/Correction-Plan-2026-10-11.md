@@ -9,6 +9,19 @@ Nothing here authorises real Downloads moves: each phase only restores the
 invariant its finding names. The supervised pilot stays where the review left
 it (read-only scan recorded; taxonomy handoff pending).
 
+## Re-audit notice (2026-10-12)
+
+The follow-up review (`Classifier_Followup_Review_2026-10-12.md`) re-opened
+parts of R1 (per-effect checks, transport), R3 (anchored reads), R5 (forward
+uncertainty, undo fallthrough), R6 (lock coverage), R7 (probe fixture safety),
+R9 (refresh/curation behaviour), R10 (materialisation absent), R11 (provenance
+typing), R12 (batch-exact audit) and R13 (taxonomy UI). The [x] marks below
+describe the FIRST correction pass only; the live status and remaining
+acceptance criteria are in `docs/Correction-Plan-2026-10-12.md`, whose pending
+section lists what is still NOT implemented (FR-06 execution, exact-token
+validation, inference queue/deadlines, retention period split, the supervised
+real-file batch).
+
 ## Phase 0 — unblock the human verification loop
 
 - [x] **R8** Production serve does not serve the UI: `serveReview()` uses plain

@@ -1,8 +1,16 @@
 # Release evidence
 
-Status: Milestones A–D code complete as of 2026-10-09. This file separates
-verified fixture evidence from real-machine measurements and from checks that
-are genuinely blocked. Nothing here is a runtime approval to move files.
+Status (updated 2026-10-12): the original "Milestones A–D code complete"
+claim was withdrawn after two spec reviews. The correction series
+(R1–R15, then F1–F12) is tracked in `docs/Correction-Plan-2026-10-11.md` and
+`docs/Correction-Plan-2026-10-12.md`; checked items there reflect shipped
+code with passing regression tests, and unfinished requirements are listed as
+explicitly pending — most notably FR-06 new-folder materialisation (this
+release moves files only into existing reviewed destinations), the global
+inference queue / per-item deadlines / exact-tokenizer validation for provider
+recommendation (R11/F12), and the supervised real-file batch, which still
+requires user labels plus a runtime approval. Nothing here is a runtime
+approval to move files. Real-file apply remains BLOCKED.
 
 ## 1. Commands and exit status (real, this machine)
 

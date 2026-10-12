@@ -150,7 +150,19 @@ test('responsive at 360 px with reduced motion honoured', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await login(page);
   await expect(page.getByRole('navigation')).toBeVisible();
-  // Content wraps without horizontal overflow.
+
+  // Follow-up review F11: measure WITH content on screen — scan, review the
+  // taxonomy, classify, and only then check overflow of the populated view.
+  await page.getByRole('button', { name: /scan/i }).first().click();
+  await expect(page.getByText(/^Batch /)).toBeVisible({ timeout: 30_000 });
+  await page.getByRole('link', { name: /taxonomy/i }).click();
+  await page.getByRole('button', { name: /approve taxonomy/i }).click();
+  await expect(page.getByTestId('taxonomy-status')).toContainText(/revision/i);
+  await page.getByRole('link', { name: /placement/i }).click();
+  await page.getByRole('button', { name: /regenerate/i }).click();
+  await expect(page.getByText('invoice-01.txt')).toBeVisible({ timeout: 15_000 });
+
+  // Tables wrap (no horizontal scrolling) at 360 px.
   const overflow = await page.evaluate(
     () => document.documentElement.scrollWidth <= document.documentElement.clientWidth,
   );
@@ -162,9 +174,17 @@ test('hostile filenames render as escaped text, never markup', async ({ page }) 
   await page.getByLabel('Token').fill(world.bootstrapToken);
   await page.getByRole('button', { name: 'Sign in' }).click();
   await expect(page.getByRole('navigation')).toBeVisible();
-  // The fixtures include shell-like names; the UI must show them as text.
-  const shellName = page.getByText('$(touch marker).txt');
-  if (await shellName.count()) {
-    await expect(shellName.first()).toBeVisible();
-  }
+  // Follow-up review F11: the hostile name IS in the world fixtures, so
+  // scan + classify and assert it appears — no conditional skip.
+  await page.getByRole('button', { name: /scan/i }).first().click();
+  await expect(page.getByText(/^Batch /)).toBeVisible({ timeout: 30_000 });
+  await page.getByRole('link', { name: /taxonomy/i }).click();
+  await page.getByRole('button', { name: /approve taxonomy/i }).click();
+  await expect(page.getByTestId('taxonomy-status')).toContainText(/revision/i);
+  await page.getByRole('link', { name: /placement/i }).click();
+  await page.getByRole('button', { name: /regenerate/i }).click();
+  const shellName = page.getByText('$(touch marker).txt', { exact: true });
+  await expect(shellName.first()).toBeVisible({ timeout: 30_000 });
+  // It renders as text, not markup: no element with that literal id/script ran.
+  await expect(page.locator('script:has-text("touch marker")')).toHaveCount(0);
 });

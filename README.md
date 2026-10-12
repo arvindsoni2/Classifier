@@ -33,7 +33,11 @@ pnpm build            # application + UI
 pnpm run doctor       # provider health with real manifests
 ```
 
-Organise a real Downloads root (read-only first):
+> **Scope of this release.** Moves target only folders that already exist and
+> are mapped in the reviewed taxonomy. Reviewed *new*-folder creation (FR-06:
+> accept a candidate, create it under approval, move into it) is NOT
+> implemented; folder proposals are recorded for review and never touch the
+> filesystem. See `docs/Correction-Plan-2026-10-12.md` (pending section).
 
 ```sh
 export ORGANISER_ROOT="$HOME/Downloads"
@@ -66,6 +70,7 @@ categories and maps them to real discovered folders.
 ## Development
 
 ```sh
+pnpm build            # required first: spawn-based tests run the compiled dist
 pnpm test             # vitest (unit + integration + provider adapters)
 pnpm test:native      # cargo tests for the filesystem helper
 pnpm test:e2e         # Playwright review flow (real helper, synthetic root)
