@@ -45,6 +45,16 @@ section below — a checked box never covers a missing feature.
   `missing`) with an optional suggested curation. Test: nine folders + a
   reviewed one-category tree classifies; custom categories survive
   scan/classify/restart.
+
+**Pilot verification (read-only, 2026-10-12).** Two defects were found on the
+real root and fixed under regression test: (a) `activeTreeStatus` let the
+discovery *suggestion* override an already-reviewed tree, so classification
+stayed blocked on any root wider than the 7-children cap (commit 69d0732);
+(b) taxonomy review accepted option descriptions beyond the provider contract's
+12-token budget, so every classification failed at request-build time instead of
+the review being refused (commit 76377f6). After both fixes the pilot classifies
+72 real candidates: 40 proposals, 30 deferred, 0 failed, 2 conflicts (files that
+left Downloads between scan and classify).
 - [x] **F3** PUT /api/taxonomy returns the same shape as GET; the UI reloads
   the authoritative taxonomy after a save. The curation UI gains category and
   group creation with parent selection, and label/description editing.
