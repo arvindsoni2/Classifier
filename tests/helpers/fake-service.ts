@@ -4,8 +4,24 @@ import type { ProviderHealth } from '../../src/cli/doctor.js';
 import type { ApplicationService } from '../../src/http/server.js';
 
 /** Fake application service: records calls, returns canned data. */
+type TaxonomyAnswer = NonNullable<ReturnType<NonNullable<ApplicationService['getTaxonomy']>>>;
+type TaxonomyValue = Extract<TaxonomyAnswer, { ok: true }>['value'];
+
 export class FakeService implements ApplicationService {
   readonly calls: { method: string; args: unknown[] }[] = [];
+  /** The canned full-taxonomy answer for the GET/PUT contract (F3). */
+  lastTaxonomy: unknown = {
+    revision: 1,
+    tree: [],
+    mappingHash: 'e'.repeat(64),
+    status: { state: 'ok' },
+    reviewed: false,
+    destinations: [],
+    unmapped: [],
+    missing: [],
+    suggested: [],
+    root: '/synthetic',
+  };
   failNext: { code: 'INVALID_DECISION' | 'STALE' | 'OUT_OF_SCOPE'; detail: string } | null = null;
 
   private ok<T>(method: string, value: T): Result<T> {
@@ -25,7 +41,25 @@ export class FakeService implements ApplicationService {
 
   async replaceTaxonomy(body: unknown): Promise<Result<{ revision: number; mappingHash: string }>> {
     this.calls.push({ method: 'replaceTaxonomy', args: [body] });
+    const tree = (body as { tree?: unknown[] } | undefined)?.tree;
+    this.lastTaxonomy = {
+      revision: 2,
+      tree: Array.isArray(tree) ? (tree as unknown[]) : [],
+      mappingHash: 'd'.repeat(64),
+      status: { state: 'ok' as const },
+      reviewed: true,
+      destinations: [],
+      unmapped: [],
+      missing: [],
+      suggested: [],
+      root: '/synthetic',
+    };
     return { ok: true, value: { revision: 2, mappingHash: 'd'.repeat(64) } };
+  }
+
+  /** Typed by the interface itself so the F3 shape drifts together with it. */
+  getTaxonomy(): TaxonomyAnswer {
+    return { ok: true, value: this.lastTaxonomy as TaxonomyValue };
   }
 
   async listProposals(batchId: string): Promise<Result<{ proposals: Proposal[]; decisions: Record<string, unknown> }>> {

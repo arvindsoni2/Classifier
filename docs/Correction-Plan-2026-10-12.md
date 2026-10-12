@@ -45,7 +45,7 @@ section below — a checked box never covers a missing feature.
   `missing`) with an optional suggested curation. Test: nine folders + a
   reviewed one-category tree classifies; custom categories survive
   scan/classify/restart.
-- [ ] **F3** PUT /api/taxonomy returns the same shape as GET; the UI reloads
+- [x] **F3** PUT /api/taxonomy returns the same shape as GET; the UI reloads
   the authoritative taxonomy after a save. The curation UI gains category and
   group creation with parent selection, and label/description editing.
   Browser test: add → approve → edit → approve again → classify.

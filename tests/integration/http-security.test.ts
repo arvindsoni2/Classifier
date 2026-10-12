@@ -264,6 +264,20 @@ describe('taxonomy and proposal routes', () => {
     expect(response.statusCode).toBe(200);
     const store = service.calls.find((call) => call.method === 'replaceTaxonomy');
     expect(store?.args[0]).toMatchObject({ expectedRevision: 1, tree });
+    // F3 contract: a save answers with the full authoritative taxonomy, the
+    // same top-level shape GET serves — never a bare { taxonomy: {...} }.
+    const body = response.json() as {
+      revision: number;
+      tree: unknown[];
+      status: { state: string };
+      reviewed: boolean;
+      destinations: unknown[];
+    };
+    expect(body.revision).toBe(2);
+    expect(body.status.state).toBe('ok');
+    expect(body.reviewed).toBe(true);
+    expect(Array.isArray(body.tree)).toBe(true);
+    expect(Array.isArray(body.destinations)).toBe(true);
   });
 
   it('patches a proposal only with a matching expectedVersion and increments it', async () => {

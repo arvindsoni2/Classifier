@@ -33,11 +33,31 @@ test('reviewed organisation flow end to end', async ({ page }) => {
   await page.getByRole('button', { name: /scan/i }).first().click();
   await expect(page.getByText(/^Batch /)).toBeVisible({ timeout: 30_000 });
 
-  // 2. Taxonomy: approve the reviewed categories.
+  // 2. Taxonomy curation in the browser (spec review F3): start from the
+  // discovered folders, add a category, edit it, remove it — each save is an
+  // explicit revisioned review.
   await page.getByRole('link', { name: /taxonomy/i }).click();
   await expect(page.getByRole('table')).toBeVisible({ timeout: 15_000 });
-  await page.getByRole('button', { name: /approve|save/i }).first().click();
-  await expect(page.getByRole('status')).toContainText(/approved|revision/i);
+  await page.getByRole('button', { name: /use suggested taxonomy/i }).click();
+  await expect(page.getByTestId('taxonomy-status')).toContainText(/revision/i);
+
+  await page.getByLabel('Label').fill('Receipts');
+  await page.getByLabel('Description').fill('receipt receipts documents');
+  await page.getByLabel('Destination folder').selectOption({ label: 'Documents' });
+  await page.getByRole('button', { name: /^save node$/i }).click();
+  await expect(page.getByTestId('taxonomy-status')).toContainText(/Added Receipts/i);
+  const receiptsRow = page.getByRole('row', { name: /Receipts/ });
+  await expect(receiptsRow).toBeVisible();
+
+  await receiptsRow.getByRole('button', { name: /edit/i }).click();
+  await page.getByLabel('Label').fill('Papers');
+  await page.getByRole('button', { name: /update node/i }).click();
+  await expect(page.getByTestId('taxonomy-status')).toContainText(/Updated Papers/i);
+
+  await page.getByRole('row', { name: /Papers/ }).getByRole('button', { name: /remove/i }).click();
+  await expect(page.getByTestId('taxonomy-status')).toContainText(/Removed/i);
+  // Each save is a review: the tree is now approved and classification unlocks.
+  await expect(page.getByRole('button', { name: /approved|approve taxonomy/i })).toBeDisabled();
 
   // 3. Regenerate placements with the rules provider.
   await page.getByRole('link', { name: /placement/i }).click();
@@ -86,8 +106,8 @@ test('unknown rows are disabled and cannot be approved', async ({ page }) => {
   // Classification requires a reviewed taxonomy (spec review R9).
   await page.getByRole('link', { name: /taxonomy/i }).click();
   await expect(page.getByRole('table')).toBeVisible({ timeout: 15_000 });
-  await page.getByRole('button', { name: /approve/i }).first().click();
-  await expect(page.getByRole('status')).toContainText(/approved|revision/i);
+  await page.getByRole('button', { name: /approve taxonomy/i }).click();
+  await expect(page.getByTestId('taxonomy-status')).toContainText(/approved|revision/i);
   await page.getByRole('link', { name: /placement/i }).click();
   await page.getByRole('button', { name: /classify|regenerate/i }).first().click();
   await expect(page.getByText('invoice-01.txt')).toBeVisible({ timeout: 15_000 });
@@ -109,8 +129,8 @@ test('keyboard and focus behaviour on the review dialog', async ({ page }) => {
   // Classification requires a reviewed taxonomy (spec review R9).
   await page.getByRole('link', { name: /taxonomy/i }).click();
   await expect(page.getByRole('table')).toBeVisible({ timeout: 15_000 });
-  await page.getByRole('button', { name: /approve/i }).first().click();
-  await expect(page.getByRole('status')).toContainText(/approved|revision/i);
+  await page.getByRole('button', { name: /approve taxonomy/i }).click();
+  await expect(page.getByTestId('taxonomy-status')).toContainText(/approved|revision/i);
   await page.getByRole('link', { name: /placement/i }).click();
   await page.getByRole('button', { name: /classify|regenerate/i }).first().click();
   await expect(page.getByText('invoice-01.txt')).toBeVisible({ timeout: 15_000 });

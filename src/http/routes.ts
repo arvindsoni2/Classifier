@@ -34,7 +34,23 @@ export interface ApplicationService {
   providerHealth(): Promise<unknown>;
 
   // Optional surfaces wired by the concrete application service (Task 9).
-  getTaxonomy?(): Result<{ revision: Revision; tree: Category[]; mappingHash: Sha256 }>;
+  /**
+   * The full authoritative taxonomy: the F2/F3 contract. Extra fields are
+   * optional so narrow fakes remain valid while the UI always reloads the
+   * complete shape from the real service.
+   */
+  getTaxonomy?(): Result<{
+    revision: Revision;
+    tree: Category[];
+    mappingHash: Sha256;
+    status?: { state: 'ok' } | { state: 'curation_required'; reason?: string };
+    reviewed?: boolean;
+    destinations?: { id: Id; segments: string[] }[];
+    unmapped?: { id: Id; segments: string[] }[];
+    missing?: { categoryId: Id; destinationId: Id }[];
+    suggested?: Category[];
+    root?: string;
+  }>;
   classifyBatch?(batchId: Id, body: { provider: string; profile: string }): Promise<Result<unknown>>;
   applyBatch?(batchId: Id, body: { approvalId: Id; actionSetHash: Sha256 }): Promise<Result<unknown>>;
   resumeBatch?(batchId: Id): Promise<Result<unknown>>;
@@ -218,7 +234,14 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
       mappings: body.mappings as { categoryId: Id; destinationId: Id }[],
     });
     if (!result.ok) return sendError(reply, statusForError(result.code), result.code, result.detail);
-    return reply.send({ taxonomy: result.value });
+    // A save answers with the FULL authoritative taxonomy, the same shape
+    // GET serves (spec review F3): the UI reloads real state after every
+    // review, so a successful save is never mistaken for an error.
+    if (service.getTaxonomy !== undefined) {
+      const fresh = service.getTaxonomy();
+      if (fresh.ok) return reply.send(fresh.value);
+    }
+    return reply.send(result.value);
   });
 
   app.get('/api/batches/:id/proposals', async (request, reply) => {

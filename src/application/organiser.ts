@@ -791,6 +791,8 @@ export class Organiser {
     destinations: { id: Id; segments: string[] }[];
     /** Discovered destinations NOT referenced by the active tree (F2). */
     unmapped: { id: Id; segments: string[] }[];
+    /** Active-tree categories whose mapped destination is no longer discovered. */
+    missing: { categoryId: Id; destinationId: Id }[];
     /** The auto-suggestion from discovery, empty when it cannot be valid. */
     suggested: Category[];
     /** The resolved organisation root, for readable target paths (R13). */
@@ -799,6 +801,13 @@ export class Organiser {
     const mapped = new Set(
       this.taxonomy.tree.map((node) => node.destinationId).filter((id): id is Id => id !== null),
     );
+    // Surface drifted mappings instead of silently dropping them (F2).
+    const missing = this.taxonomy.tree
+      .filter(
+        (node): node is Category & { destinationId: Id } =>
+          node.destinationId !== null && !this.destinations.has(node.destinationId),
+      )
+      .map((node) => ({ categoryId: node.id, destinationId: node.destinationId }));
     return ok({
       revision: this.taxonomy.revision,
       tree: this.taxonomy.tree,
@@ -813,6 +822,7 @@ export class Organiser {
       unmapped: [...this.destinations.values()]
         .filter((destination) => !mapped.has(destination.id))
         .map((destination) => ({ id: destination.id, segments: destination.segments })),
+      missing,
       suggested: this.suggestedTree,
       root: this.root?.absolutePath ?? '',
     });
