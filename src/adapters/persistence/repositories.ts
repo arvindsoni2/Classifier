@@ -134,6 +134,8 @@ export interface Repositories {
     /** Records which items a scan batch actually observed (R12). */
     addToBatch(batchId: Id, itemIds: Id[]): void;
     listByBatch(batchId: Id): { item: Item; rootId: Id }[];
+    /** True once ANY scan has recorded membership (legacy-database gate, F7). */
+    hasMembership(): boolean;
   };
   batches: {
     create(rootId: Id): Batch;
@@ -149,6 +151,8 @@ export interface Repositories {
     save(proposal: Proposal): void;
     get(id: Id): Proposal | null;
     listByRoot(rootId: Id): Proposal[];
+    /** Proposals whose items the batch actually scanned (spec review F7). */
+    listByBatch(batchId: Id): Proposal[];
     /** Marks pending proposals bound to an older taxonomy revision stale. */
     markStaleBeforeRevision(revision: Revision): void;
   };
@@ -378,7 +382,44 @@ export function createRepositories(dbPath: string): Repositories {
     }
   }
 
+  // Detect tables the previous release lacked BEFORE creating them, so the
+  // one-time upgrades below can tell "fresh database" from "old database".
+  const tableExisted = (name: string): boolean =>
+    (db
+      .prepare('SELECT 1 FROM sqlite_master WHERE type = ? AND name = ?')
+      .get('table', name) !== undefined);
+  const hadBatchItems = tableExisted('batch_items');
+
+  // Detect a pre-membership database BEFORE the schema runs so the upgrade
+  // can reconstruct batch memberships explicitly (spec review F7) instead of
+  // leaving an eternal root-wide ambiguity. Fresh databases see the table
+  // created with zero rows and skip the backfill.
+  const preMembership =
+    (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'batch_items'").get() as
+      | { name: string }
+      | undefined) === undefined;
   db.exec(readFileSync(new URL('./schema.sql', import.meta.url), 'utf8'));
+  if (preMembership) {
+    // Every batch that predates the membership tables gets the items of its
+    // own root: the closest reconstruction of what it scanned. Idempotent and
+    // runs at most once per database (the marker is the table itself).
+    db.prepare(
+      `INSERT OR IGNORE INTO batch_items (batch_id, item_id)
+       SELECT b.id, i.id FROM batches b JOIN items i ON i.root_id = b.root_id`,
+    ).run();
+  }
+
+  // Explicit membership migration (spec review F7): an old database without
+  // batch_items gets a one-time reconstruction — each existing batch
+  // receives the items of its own root, the closest truthful record of what
+  // it scanned. New databases never take this branch, so an empty batch is
+  // always genuinely empty.
+  if (!hadBatchItems) {
+    db.exec(
+      `INSERT OR IGNORE INTO batch_items (batch_id, item_id)
+       SELECT b.id, i.id FROM batches b JOIN items i ON i.root_id = b.root_id`,
+    );
+  }
   // Additive migration: databases created before the R2 pins column gain it
   // without losing rows. Existing approvals stay readable and report no pins,
   // which the application treats as "re-approve required", never as a bypass.
@@ -487,6 +528,13 @@ export function createRepositories(dbPath: string): Repositories {
   const addBatchItem = db.prepare(
     'INSERT OR IGNORE INTO batch_items (batch_id, item_id) VALUES (?, ?)',
   );
+  const anyMembership = db.prepare('SELECT EXISTS(SELECT 1 FROM batch_items) AS any');
+  const listProposalsByBatch = db.prepare(
+    `SELECT p.* FROM proposals p
+     JOIN items i ON i.id = p.item_id
+     JOIN batch_items b ON b.item_id = i.id
+     WHERE b.batch_id = ? ORDER BY p.rowid`,
+  );
   const addBatchExclusion = db.prepare(
     'INSERT INTO batch_exclusions (batch_id, reason) VALUES (?, ?)',
   );
@@ -590,6 +638,10 @@ export function createRepositories(dbPath: string): Repositories {
       listByBatch(batchId) {
         const rows = listItemsByBatch.all(batchId) as ItemRow[];
         return rows.map((row) => ({ item: mapItemRow(row), rootId: row.root_id }));
+      },
+      hasMembership() {
+        const row = anyMembership.get() as { any: number };
+        return row.any === 1;
       },
       save(item, rootId) {
         insertItem.run(
@@ -722,6 +774,10 @@ export function createRepositories(dbPath: string): Repositories {
       },
       listByRoot(rootId) {
         const rows = listProposalsByRoot.all(rootId) as ProposalRow[];
+        return rows.map(mapProposalRow);
+      },
+      listByBatch(batchId) {
+        const rows = listProposalsByBatch.all(batchId) as ProposalRow[];
         return rows.map(mapProposalRow);
       },
     },

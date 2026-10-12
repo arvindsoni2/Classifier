@@ -274,7 +274,8 @@ export class Organiser {
       }
     }
     // Per-batch membership: a later classification run classifies what THIS
-    // scan observed, not every historic revision under the root.
+    // scan observed, not every historic revision under the root. Old
+    // databases were already reconstructed once at open (repositories).
     this.repositories.items.addToBatch(batch.id, scannedItemIds);
     this.refreshSuggestion();
     return { batchId: batch.id, rootId: root.rootId, candidates, deferred, directories: directories.value.length };
@@ -521,24 +522,26 @@ export class Organiser {
   private itemsForBatch(batch: Id): Item[] {
     const batchRow = this.repositories.batches.get(batch);
     if (batchRow === null) return [];
-    const rows = this.repositories.items.listByBatch(batch);
-    if (rows.length > 0) {
-      return rows.map((entry) => ({ ...entry.item, sourceKind: 'filesystem' as const }));
-    }
-    // Pre-membership batches (older databases) fall back to the root's items.
-    return this.itemsForRoot(batchRow.rootId);
+    // Databases that predate the membership tables (spec review F7) are
+    // reconstructed once at scan time; after that, an empty batch stays
+    // genuinely empty. No eternal root-wide ambiguity remains.
+    return this.repositories.items
+      .listByBatch(batch)
+      .map((entry) => ({ ...entry.item, sourceKind: 'filesystem' as const }));
   }
 
   async listProposals(
     batchId?: Id,
   ): Promise<Result<{ proposals: Proposal[]; decisions: Record<Id, DecisionDigest> }>> {
     let rootId: Id | null = null;
+    let batchForList: { id: Id } | null = null;
     if (batchId !== undefined) {
       const batch = this.repositories.batches.get(batchId);
       if (batch === null) {
         return { ok: false, code: 'OUT_OF_SCOPE', detail: `unknown batch ${batchId}` };
       }
       rootId = batch.rootId;
+      batchForList = batch;
     } else {
       await this.ensureRoot();
       const batch = this.currentBatch();
@@ -546,15 +549,23 @@ export class Organiser {
         return { ok: false, code: 'OUT_OF_SCOPE', detail: 'no batch available; run scan first' };
       }
       rootId = batch.rootId;
+      batchForList = batch;
     }
-    const proposals = this.repositories.proposals.listByRoot(rootId);
+    // Batch-bound listing (spec review F7): proposals for the items THIS batch
+    // scanned, never historic root-wide rows. Legacy databases (no membership
+    // at all) keep the root view so pre-F7 approvals remain reviewable.
+    const proposals = this.repositories.items.hasMembership() && batchForList !== null
+      ? this.repositories.proposals.listByBatch(batchForList.id)
+      : this.repositories.proposals.listByRoot(rootId);
     // The persisted provider decisions are surfaced with their real
     // provenance so the review can inspect evidence, not just a destination
     // (spec review R13/R12).
     const decisions: Record<Id, DecisionDigest> = {};
-    const itemsById = new Map(
-      this.repositories.items.listByRoot(rootId).map((row) => [row.item.id, row.item.id]),
-    );
+    const scopeItems =
+      this.repositories.items.hasMembership() && batchForList !== null
+        ? this.repositories.items.listByBatch(batchForList.id)
+        : this.repositories.items.listByRoot(rootId);
+    const itemsById = new Map(scopeItems.map((row) => [row.item.id, row.item.id]));
     const decisionRows = this.repositories.decisions
       .listByRoot(rootId)
       .map((row) => ({ id: row.decision.id, itemId: row.decision.itemId, record: row.decision }));
@@ -849,10 +860,31 @@ export class Organiser {
     ).then(ok);
   }
 
-  /** HTTP surface: apply with the exact approval and action-set hash. */
-  applyBatch(batchId: Id, body: { approvalId: Id; actionSetHash: string }): Promise<Result<unknown>> {
-    void batchId;
-    return this.apply(body.approvalId, body.actionSetHash).then(ok);
+  /**
+   * HTTP surface: apply with the exact approval and action-set hash. The
+   * URL's batch id is PASSED THROUGH (spec review F7): the service refuses an
+   * approval bound to a different batch instead of silently applying the
+   * approval's own batch.
+   */
+  async applyBatch(batchId: Id, body: { approvalId: Id; actionSetHash: string }): Promise<Result<unknown>> {
+    const approval = this.repositories.approvals.get(body.approvalId);
+    if (approval === null) {
+      return { ok: false, code: 'OUT_OF_SCOPE', detail: `unknown approval ${body.approvalId}` };
+    }
+    // A mismatched transport batch is refused here, hard, before any effect
+    // (spec review F7): the URL cannot silently re-point the approval's own
+    // batch, and the service's own check stays as the second line of defence.
+    if (approval.batchId !== batchId) {
+      return {
+        ok: false,
+        code: 'OUT_OF_SCOPE',
+        detail: `approval ${body.approvalId} belongs to batch ${approval.batchId}, not ${batchId}`,
+      };
+    }
+    // The destination catalogue is re-verified read-only before any move.
+    await this.refreshCatalogue();
+    const applied = await this.service.applyBatch(batchId, body.approvalId, body.actionSetHash);
+    return ok(applied);
   }
 
   /** HTTP surface: reconcile a batch's unfinished work. */

@@ -225,9 +225,15 @@ export class ApplicationService {
     if (batch === null) return err('OUT_OF_SCOPE', `unknown batch ${batchId}`);
     // Batch/root membership: an approval can only bind proposals scanned into
     // its own batch root (spec review R1).
-    const rootItems = new Set(this.repositories.items.listByRoot(batch.rootId).map((row) => row.item.id));
+    // Batch membership (spec review F7): once scans record membership, an
+    // approval may only bind proposals for items THIS batch observed. Legacy
+    // databases without any membership fall back to the root-wide check.
+    const scoped = this.repositories.items.hasMembership()
+      ? this.repositories.items.listByBatch(batchId).map((row) => row.item.id)
+      : this.repositories.items.listByRoot(batch.rootId).map((row) => row.item.id);
+    const allowedItems = new Set(scoped);
     for (const proposal of selected) {
-      if (!rootItems.has(proposal.itemId)) {
+      if (!allowedItems.has(proposal.itemId)) {
         return err('OUT_OF_SCOPE', `proposal ${proposal.id} does not belong to batch ${batchId}`);
       }
     }

@@ -49,7 +49,7 @@ section below — a checked box never covers a missing feature.
   the authoritative taxonomy after a save. The curation UI gains category and
   group creation with parent selection, and label/description editing.
   Browser test: add → approve → edit → approve again → classify.
-- [ ] **F7** Batch isolation end to end: legacy fallback only when the
+- [x] **F7** Batch isolation end to end: legacy fallback only when the
   database truly predates membership tables (empty current batch stays
   empty); proposals listed per batch; approval creation binds batch
   membership, not just root; the HTTP apply wrapper passes and validates the

@@ -56,6 +56,13 @@ function seedProposal(
   if (!planned.ok) throw new Error(planned.detail);
   const proposal: Proposal = { ...planned.value, id: `proposal-${basename}` };
   repositories.proposals.save(proposal);
+  // Production proposals exist because a scan batch observed the item and
+  // classification planned it; reproduce that membership (F7), otherwise the
+  // batch-bound checks would (correctly) reject it.
+  const latestBatch = repositories.batches.listByRoot(rootId).at(-1);
+  if (latestBatch !== undefined) {
+    repositories.items.addToBatch(latestBatch.id, [item.id]);
+  }
   return proposal;
 }
 
