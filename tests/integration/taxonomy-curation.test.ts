@@ -115,6 +115,51 @@ describe('taxonomy curation (R9)', () => {
     restarted.close();
   }, 60_000);
 
+  it('classifies a reviewed tree even when the auto-suggestion overflows (pilot F2)', async () => {
+    // The real pilot root has 500 folders, so the discovery suggestion can
+    // NEVER fit under one group. Once the user reviews their own valid tree,
+    // the suggestion's overflow must not keep blocking classification.
+    const { rootDir, dbPath } = world('reviewed-vs-overflow', [
+      'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'Invoices',
+    ]);
+    const organiser = new Organiser({ dbPath, rootPath: rootDir, stabilityWindowMs: 0 });
+    await organiser.scan();
+
+    // Before review: blocked, and the reason is the real overflow.
+    await expect(organiser.classify(undefined, 'rules')).rejects.toThrow(/curation required/i);
+
+    const taxonomy = organiser.getTaxonomy();
+    if (!taxonomy.ok) throw new Error(taxonomy.detail);
+    const invoices = taxonomy.value.destinations.find((entry) => entry.segments[0] === 'Invoices');
+    expect(invoices).toBeDefined();
+    const reviewed = await organiser.replaceTaxonomy({
+      expectedRevision: taxonomy.value.revision,
+      tree: [
+        { id: 'root', parentId: null, label: 'Inbox', description: 'Root grouping', destinationId: null, kind: 'group' },
+        {
+          id: 'cat-invoices',
+          parentId: 'root',
+          label: 'Invoices',
+          description: 'Invoice documents',
+          destinationId: invoices?.id ?? '',
+          kind: 'existing',
+        },
+      ],
+      mappings: [{ categoryId: 'cat-invoices', destinationId: invoices?.id ?? '' }],
+    });
+    expect(reviewed.ok).toBe(true);
+
+    // After review: status is ok, classification runs, the other nine
+    // folders are surfaced as unmapped WITHOUT blocking anything.
+    const after = organiser.getTaxonomy();
+    if (!after.ok) throw new Error(after.detail);
+    expect(after.value.status.state).toBe('ok');
+    expect(after.value.unmapped.length).toBeGreaterThanOrEqual(9);
+    const classified = await organiser.classify(undefined, 'rules');
+    expect(classified.failed).toBe(0);
+    organiser.close();
+  }, 60_000);
+
   it('refuses classification until the taxonomy is reviewed', async () => {
     const { rootDir, dbPath } = world('gate', ['Invoices']);
     const organiser = new Organiser({ dbPath, rootPath: rootDir, stabilityWindowMs: 0 });

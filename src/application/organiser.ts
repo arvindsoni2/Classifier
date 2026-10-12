@@ -315,9 +315,31 @@ export class Organiser {
 
   /** The active tree's own curation status, based on its mapped destinations. */
   private activeTreeStatus(): { state: 'ok' } | { state: 'curation_required'; reason: string } {
-    if (this.suggestionStatus.state !== 'ok') return this.suggestionStatus;
+    // An UNREVIEWED tree can authorise nothing; there the suggestion's own
+    // state is the actionable message. The suggestion, however, is only a
+    // starting point: on roots with more folders than one group may hold it
+    // can NEVER be valid, so it must not override a reviewed tree's status
+    // (the pilot's F2 finding).
     if (this.repositories.taxonomies.latest() === null) {
-      return { state: 'curation_required', reason: 'the taxonomy has not been reviewed yet' };
+      return this.suggestionStatus.state === 'ok'
+        ? { state: 'curation_required', reason: 'the taxonomy has not been reviewed yet' }
+        : this.suggestionStatus;
+    }
+    // A reviewed tree is judged on itself: every mapped destination must
+    // still be discovered (drift surfaces here, not as a batch of cryptic
+    // per-item conflicts). An empty-but-reviewed tree stays classifiable:
+    // items then defer/fail visibly, which is honest signal.
+    const mapped = this.taxonomy.tree.filter((node) => node.destinationId !== null);
+    if (this.destinations.size > 0 && mapped.length > 0) {
+      const missing = mapped.filter((node) => !this.destinations.has(node.destinationId as Id));
+      if (missing.length > 0) {
+        return {
+          state: 'curation_required',
+          reason:
+            `categories ${missing.map((node) => node.id).join(', ')} map destinations no longer discovered (` +
+            `${missing.map((node) => node.destinationId).join(', ')}); re-map or remove them`,
+        };
+      }
     }
     return { state: 'ok' };
   }
