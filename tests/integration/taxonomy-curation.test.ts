@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import { Organiser } from '../../src/application/organiser.js';
-import { reviewScannedTaxonomy } from '../helpers/review-taxonomy.js';
+import { reviewScannedTaxonomy, reviewTree } from '../helpers/review-taxonomy.js';
 
 /**
  * Spec review R9: discovered folders stay separate from the approved semantic
@@ -157,6 +157,62 @@ describe('taxonomy curation (R9)', () => {
     expect(after.value.unmapped.length).toBeGreaterThanOrEqual(9);
     const classified = await organiser.classify(undefined, 'rules');
     expect(classified.failed).toBe(0);
+    organiser.close();
+  }, 60_000);
+
+  it('refuses a review whose description the provider contract cannot carry', async () => {
+    // The real pilot reviewed a 27-token description and every one of the 72
+    // items then failed at request-build time. The review is where that has
+    // to be refused, with the offending category named.
+    const { rootDir, dbPath } = world('description-budget', ['Invoices', 'Media']);
+    const organiser = new Organiser({ dbPath, rootPath: rootDir, stabilityWindowMs: 0 });
+    await organiser.scan();
+    const taxonomy = organiser.getTaxonomy();
+    if (!taxonomy.ok) throw new Error(taxonomy.detail);
+    const invoices = taxonomy.value.destinations.find((entry) => entry.segments[0] === 'Invoices');
+    expect(invoices).toBeDefined();
+    const replaced = await organiser.replaceTaxonomy({
+      expectedRevision: taxonomy.value.revision,
+      tree: [
+        { id: 'root', parentId: null, label: 'Inbox', description: 'Root grouping', destinationId: null, kind: 'group' },
+        {
+          id: 'cat-invoices',
+          parentId: 'root',
+          label: 'Invoices',
+          description: 'invoice bills receipts statements settlements payments documents and statements',
+          destinationId: invoices?.id ?? '',
+          kind: 'existing',
+        },
+      ],
+      mappings: [{ categoryId: 'cat-invoices', destinationId: invoices?.id ?? '' }],
+    });
+    expect(replaced.ok).toBe(false);
+    if (replaced.ok) return;
+    expect(replaced.detail).toMatch(/cat-invoices/);
+    expect(replaced.detail).toMatch(/option-description limit/i);
+    organiser.close();
+  }, 60_000);
+
+  it('suggests a reviewable description for long folder names', async () => {
+    // A 28-byte folder name plus the generated suffix is 66 bytes = 22
+    // tokens: without clamping the whole suggestion becomes unreviewable and
+    // discovery would strand the root.
+    const { rootDir, dbPath } = world('long-folder-names', ['AI_Architect_Handbook_v0.3.0', 'Invoices']);
+    const organiser = new Organiser({ dbPath, rootPath: rootDir, stabilityWindowMs: 0 });
+    await organiser.scan();
+
+    const suggested = organiser.suggestTaxonomy();
+    expect(suggested.ok).toBe(true);
+    if (!suggested.ok) return;
+    await reviewTree(organiser, suggested.value);
+
+    const after = organiser.getTaxonomy();
+    if (!after.ok) throw new Error(after.detail);
+    expect(after.value.reviewed).toBe(true);
+    expect(after.value.status.state).toBe('ok');
+    const classified = await organiser.classify(undefined, 'rules');
+    expect(classified.failed).toBe(0);
+    expect(classified.conflicts).toHaveLength(0);
     organiser.close();
   }, 60_000);
 

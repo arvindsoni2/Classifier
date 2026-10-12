@@ -73,6 +73,16 @@ export function validateTaxonomy(tree: Category[], destinations: Destination[]):
     if (typeof category.label !== 'string' || category.label.length === 0) {
       return err('INVALID_DECISION', `category ${category.id} has an empty label`);
     }
+    if (category.parentId !== null && estimateTokens(category.description) > OPTION_DESCRIPTION_TOKEN_LIMIT) {
+      // Categories become provider options: a description beyond the 12-token
+      // option budget makes EVERY classification fail at request-build time
+      // (the pilot's 72/72 finding). Refuse it at review, naming the category.
+      return err(
+        'INVALID_DECISION',
+        `category ${category.id} description exceeds the ${OPTION_DESCRIPTION_TOKEN_LIMIT}-token option-description limit ` +
+          `(${estimateTokens(category.description)} tokens); shorten it`,
+      );
+    }
     if (!['group', 'existing', 'candidate'].includes(category.kind)) {
       return err('INVALID_DECISION', `category ${category.id} has invalid kind ${category.kind}`);
     }
@@ -164,6 +174,29 @@ export function validateTaxonomy(tree: Category[], destinations: Destination[]):
  * limits; the exact-token requirement is re-verified provider-side or with
  * the pinned tokenizer once available.
  */
+/** Byte budget implied by the option-description token limit (ceil(bytes/3)). */
+export const OPTION_DESCRIPTION_BYTE_BUDGET = OPTION_DESCRIPTION_TOKEN_LIMIT * 3;
+
+/**
+ * Trims generated option descriptions to the provider contract's option
+ * budget at a word boundary (never mid-word), so discovery-built suggestions
+ * are always reviewable.
+ */
+export function fitOptionDescription(description: string): string {
+  if (Buffer.byteLength(description, 'utf8') <= OPTION_DESCRIPTION_BYTE_BUDGET) {
+    return description;
+  }
+  const words = description.split(' ');
+  let out = '';
+  for (const word of words) {
+    const candidate = out === '' ? word : `${out} ${word}`;
+    if (Buffer.byteLength(candidate, 'utf8') > OPTION_DESCRIPTION_BYTE_BUDGET) break;
+    out = candidate;
+  }
+  // A single over-budget word: keep its budget-safe prefix.
+  return out === '' ? description.slice(0, OPTION_DESCRIPTION_BYTE_BUDGET) : out;
+}
+
 export function estimateTokens(text: string): number {
   const bytes = Buffer.byteLength(text, 'utf8');
   return Math.max(1, Math.ceil(bytes / 3));

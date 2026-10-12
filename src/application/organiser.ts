@@ -25,7 +25,7 @@ import {
 import { planPlacement, suggestFolderGroups, validateApproval } from '../domain/planner.js';
 import { UNKNOWN_OPTION_ID } from '../domain/contracts.js';
 import { patchProposal, rejectProposal } from '../domain/policy.js';
-import { validateTaxonomy, buildMatchedRequest, type Taxonomy } from '../domain/taxonomy.js';
+import { validateTaxonomy, buildMatchedRequest, fitOptionDescription, type Taxonomy } from '../domain/taxonomy.js';
 import { createRepositories, type Repositories } from '../adapters/persistence/repositories.js';
 import { resolveRoot } from '../adapters/filesystem/root.js';
 import { FilesystemSource } from '../adapters/filesystem/source.js';
@@ -293,11 +293,15 @@ export class Organiser {
       { id: 'root', parentId: null, label: 'Inbox', description: 'Root grouping', destinationId: null, kind: 'group' },
     ];
     for (const destination of this.destinations.values()) {
+      const segment = destination.segments.at(-1) ?? destination.id;
       tree.push({
         id: `cat-${destination.id}`,
         parentId: 'root',
-        label: destination.segments[destination.segments.length - 1] ?? destination.id,
-        description: `${destination.segments.at(-1) ?? ''} ${singular(destination.segments.at(-1) ?? '')} documents`,
+        label: segment,
+        // A generated description must itself fit the provider contract's
+        // option budget, otherwise a long folder name would make the whole
+        // suggestion unreviewable (pilot: `AI_Architect_Handbook_v0.3.0 …`).
+        description: fitOptionDescription(`${segment} ${singular(segment)} documents`),
         destinationId: destination.id,
         kind: 'existing',
       });
