@@ -28,7 +28,11 @@ pub fn map_errno(operation: &str, errno: i32) -> FsError {
         ),
         libc::EPERM | libc::EACCES => FsError::new("UNAUTHORISED", &detail),
         libc::EINVAL => FsError::new("INVALID_DECISION", &detail),
-        libc::ENOENT | libc::ELOOP | libc::ENOTDIR => FsError::new("OUT_OF_SCOPE", &detail),
+        libc::ENOENT => FsError::new("NOT_FOUND", &format!("{operation}: no such file or directory")),
+        libc::ELOOP | libc::ENOTDIR => FsError::new(
+            "OUT_OF_SCOPE",
+            &format!("{operation} refused: the path is not a plain file inside the root (symlink or type error)"),
+        ),
         libc::EXDEV => FsError::new(
             "CROSS_MOUNT",
             &format!("{operation} would cross a mount boundary; deferred, no fallback"),

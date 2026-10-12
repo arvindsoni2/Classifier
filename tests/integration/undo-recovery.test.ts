@@ -108,6 +108,108 @@ describe('undo and recovery boundaries (R5)', () => {
     expect(moveCalls).toBe(1);
   }, 30_000);
 
+  it('keeps a forward move with an uncertain failure non-terminal', async () => {
+    // Follow-up review F5(a): the helper moved the file and THEN reported a
+    // transport failure. That must not be committed as a terminal conflict;
+    // a later resume reconciles reality and records Applied.
+    const world: World = makeWorld('forward-uncertain', { 'invoice-01.txt': 'only file\n' });
+    const approval = world.approve();
+    const realMoveAt = world.helper.moveAt.bind(world.helper);
+    world.helper.moveAt = async (action, root, destination) => {
+      await realMoveAt(action, root, destination);
+      return { ok: false, code: 'PROVIDER_FAILED', detail: 'connection lost after the effect' };
+    };
+
+    const result = await world.service.applyBatch(world.batch.id, approval.approvalId, approval.actionSetHash);
+    const record = world.repositories.actions.find('proposal-invoice-01.txt', 1, 'apply');
+    expect(result.results[0]?.outcome).toBe('conflict');
+    expect(record?.state).not.toBe('conflict');
+    expect(['intent', 'planned']).toContain(record?.state);
+    expect(world.exists('Documents/invoice-01.txt')).toBe(true);
+
+    const restarted = world.restart();
+    const resumed = await restarted.resumeBatch(world.batch.id);
+    expect(resumed.results[0]?.outcome).toBe('applied');
+  }, 30_000);
+
+  it('cancellation after a completed undo records undone, not canceled', async () => {
+    // Follow-up review F5(c): the reverse move happened; cancellation must
+    // resolve the effect (undone) instead of erasing it.
+    const world: World = makeWorld('cancel-undo', { 'invoice-01.txt': 'only file\n' });
+    const approval = world.approve();
+    await world.service.applyBatch(world.batch.id, approval.approvalId, approval.actionSetHash);
+
+    const undoApproval = world.service.createApproval(
+      world.batch.id,
+      [{ proposalId: 'proposal-invoice-01.txt', version: 1 }],
+      'undo',
+      new Date('2026-10-07T12:00:00.000Z'),
+    );
+    expect(undoApproval.ok).toBe(true);
+    if (!undoApproval.ok) return;
+    world.crashAt('after-undo-rename');
+    await expect(
+      world.service.undoAction(firstApplyActionId(world), undoApproval.value.id),
+    ).rejects.toThrow(CrashSignal);
+    expect(world.exists('invoice-01.txt')).toBe(true);
+
+    world.repositories.batches.requestCancel(world.batch.id);
+    const restarted = world.restart();
+    const resumed = await restarted.resumeBatch(world.batch.id);
+    const undoResult = resumed.results.find(
+      (entry) => entry.outcome !== 'applied' || true,
+    );
+    const outcomes = resumed.results.map((entry) => entry.outcome);
+    expect(outcomes).toContain('undone');
+    void undoResult;
+    expect(world.exists('Documents/invoice-01.txt')).toBe(false);
+    expect(world.exists('invoice-01.txt')).toBe(true);
+  }, 30_000);
+
+  it('does not fall through from a failed reconcile into a second undo attempt', async () => {
+    // Follow-up review F5(b): one undo request performs at most one helper
+    // call; a persistent uncertain failure stays non-terminal for a LATER
+    // request to reconcile again.
+    const world: World = makeWorld('undo-fallthrough', { 'invoice-01.txt': 'only file\n' });
+    const approval = world.approve();
+    await world.service.applyBatch(world.batch.id, approval.approvalId, approval.actionSetHash);
+
+    const undoApproval = world.service.createApproval(
+      world.batch.id,
+      [{ proposalId: 'proposal-invoice-01.txt', version: 1 }],
+      'undo',
+      new Date('2026-10-07T12:00:00.000Z'),
+    );
+    expect(undoApproval.ok).toBe(true);
+    if (!undoApproval.ok) return;
+
+    let calls = 0;
+    world.helper.undoAt = async (action, root) => {
+      void root;
+      void action;
+      calls += 1;
+      return { ok: false, code: 'PROVIDER_FAILED', detail: 'connection lost, effect unknown' };
+    };
+    const first = await world.service.undoAction(firstApplyActionId(world), undoApproval.value.id);
+    expect(first.ok).toBe(false);
+    // First request: exactly one attempt.
+    expect(calls).toBe(1);
+
+    // The uncertain failure left the record non-terminal; a second request
+    // performs at most ONE reconciled retry, never reconcile + blind retry.
+    const second = await world.service.undoAction(firstApplyActionId(world), undoApproval.value.id);
+    expect(second.ok).toBe(false);
+    expect(calls).toBeLessThanOrEqual(2);
+    const afterSecond = calls;
+    // A third request with the same persistent uncertainty cannot multiply
+    // attempts without bound.
+    const third = await world.service.undoAction(firstApplyActionId(world), undoApproval.value.id);
+    expect(third.ok).toBe(false);
+    expect(calls).toBeLessThanOrEqual(afterSecond + 1);
+    const record = world.repositories.actions.find('proposal-invoice-01.txt', 1, 'undo');
+    expect(['undo_intent', 'reconciling']).toContain(record?.state);
+  }, 30_000);
+
   it('resolves whether an effect happened before honoring cancellation', async () => {
     const world: World = makeWorld('cancel-after-effect', { 'invoice-01.txt': 'only file\n' });
     const approval = world.approve();

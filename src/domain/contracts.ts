@@ -14,6 +14,9 @@ export type ProviderId = 'rules' | 'laya' | 'clef' | 'jev';
 
 export type ErrorCode =
   | 'OUT_OF_SCOPE'
+  // A location is confirmed absent (ENOENT), as opposed to OUT_OF_SCOPE
+  // which covers symlink/type/mount refusals that are NOT absence.
+  | 'NOT_FOUND'
   | 'UNSTABLE'
   | 'OVERSIZE'
   | 'UNSUPPORTED'

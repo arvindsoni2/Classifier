@@ -49,6 +49,7 @@ interface HelperResponse {
 
 const KNOWN_CODES: readonly ErrorCode[] = [
   'OUT_OF_SCOPE',
+  'NOT_FOUND',
   'UNSTABLE',
   'OVERSIZE',
   'UNSUPPORTED',

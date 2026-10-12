@@ -169,6 +169,80 @@ describe('approval authorisation (R1)', () => {
   }, 30_000);
 });
 
+/**
+ * Spec review F4: an approval authorises a set of actions AT CURRENT STATE.
+ * Every effect must revalidate; a mid-batch edit, rejection, taxonomy change
+ * or expiry stops the remaining actions with zero further helper calls.
+ */
+describe('per-effect revalidation (F4)', () => {
+  it('stops the batch when the durable taxonomy moves on mid-loop', async () => {
+    const world: World = makeWorld('f4-taxonomy');
+    const approval = world.approve();
+
+    // After the first move lands, the user curates the taxonomy again.
+    let moves = 0;
+    const realMoveAt = world.helper.moveAt.bind(world.helper);
+    world.helper.moveAt = async (action, root, destination) => {
+      const result = await realMoveAt(action, root, destination);
+      moves += 1;
+      if (moves === 1) world.setTaxonomyRevision(2);
+      return result;
+    };
+
+    const result = await world.service.applyBatch(world.batch.id, approval.approvalId, approval.actionSetHash);
+    expect(moves).toBe(1);
+    expect(result.results[0]?.outcome).toBe('applied');
+    const refused = result.results.slice(1);
+    expect(refused.every((entry) => entry.outcome === 'stale')).toBe(true);
+    expect(result.results.length).toBe(world.proposals.length);
+  });
+
+  it('stops the batch when a later proposal is rejected mid-loop', async () => {
+    const world: World = makeWorld('f4-reject');
+    const approval = world.approve();
+    const second = world.proposals[1];
+    expect(second).toBeDefined();
+
+    let moves = 0;
+    const realMoveAt = world.helper.moveAt.bind(world.helper);
+    world.helper.moveAt = async (action, root, destination) => {
+      const result = await realMoveAt(action, root, destination);
+      moves += 1;
+      if (moves === 1 && second !== undefined) {
+        const stored = world.repositories.proposals.get(second.id);
+        if (stored !== null) {
+          world.repositories.proposals.save({ ...stored, state: 'rejected', version: stored.version + 1 });
+        }
+      }
+      return result;
+    };
+
+    const result = await world.service.applyBatch(world.batch.id, approval.approvalId, approval.actionSetHash);
+    expect(moves).toBe(1);
+    expect(result.results[0]?.outcome).toBe('applied');
+    expect(result.results.slice(1).every((entry) => entry.outcome === 'stale')).toBe(true);
+  });
+
+  it('stops the batch when the approval expires mid-loop', async () => {
+    const world: World = makeWorld('f4-expiry');
+    const approval = world.approve();
+
+    let moves = 0;
+    const realMoveAt = world.helper.moveAt.bind(world.helper);
+    world.helper.moveAt = async (action, root, destination) => {
+      const result = await realMoveAt(action, root, destination);
+      moves += 1;
+      if (moves === 1) world.advance(25 * 60 * 60 * 1000);
+      return result;
+    };
+
+    const result = await world.service.applyBatch(world.batch.id, approval.approvalId, approval.actionSetHash);
+    expect(moves).toBe(1);
+    expect(result.results[0]?.outcome).toBe('applied');
+    expect(result.results.slice(1).every((entry) => entry.outcome === 'stale')).toBe(true);
+  });
+});
+
 describe('proposal lifecycle (R4)', () => {
   it('regeneration keeps an edited version and does not revive its old approval', () => {
     const world: World = makeWorld('regeneration');

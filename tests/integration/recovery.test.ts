@@ -208,7 +208,7 @@ describe('resumeBatch and undo on synthetic roots', () => {
       },
       async inspectAt(_root: unknown, segments: readonly string[]) {
         const path = join(rootDir, ...segments);
-        if (!existsSync(path)) return { ok: false as const, code: 'OUT_OF_SCOPE' as const, detail: 'absent' };
+        if (!existsSync(path)) return { ok: false as const, code: 'NOT_FOUND' as const, detail: 'absent' };
         const observed = statSync(path, { bigint: true });
         return {
           ok: true as const,
@@ -423,7 +423,7 @@ describe('resumeBatch and undo on synthetic roots', () => {
       },
       async inspectAt(rootArg: RootConfig, segments: readonly string[]) {
         const path = join(rootArg.absolutePath, ...segments);
-        if (!existsSync(path)) return { ok: false as const, code: 'OUT_OF_SCOPE' as const, detail: 'absent' };
+        if (!existsSync(path)) return { ok: false as const, code: 'NOT_FOUND' as const, detail: 'absent' };
         return { ok: true as const, value: snapshotOfPath(path) };
       },
       async probe() {

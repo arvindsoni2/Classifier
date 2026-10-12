@@ -123,7 +123,9 @@ export class RecordingHelper implements HelperPort {
   async inspectAt(root: RootConfig, segments: readonly string[]): Promise<Result<Snapshot>> {
     const path = join(root.absolutePath, ...segments);
     if (!existsSync(path)) {
-      return { ok: false, code: 'OUT_OF_SCOPE', detail: `no file at ${path}` };
+      // ENOENT-class: a confirmed-missing location (NOT_FOUND), distinct from
+      // symlink/type refusals (OUT_OF_SCOPE) the native helper also reports.
+      return { ok: false, code: 'NOT_FOUND', detail: `no file at ${path}` };
     }
     return { ok: true, value: snapshotOf(path, readFileSync(path)) };
   }
@@ -158,6 +160,8 @@ export interface World {
   destinations: Map<string, Destination>;
   /** Simulates re-discovery replacing a destination directory's identity. */
   swapDestinationIdentity: (destinationId: string, device: string, inode: string) => void;
+  /** Advances the durable reviewed taxonomy revision a live service reads. */
+  setTaxonomyRevision: (revision: number) => void;
   root: RootConfig;
   batch: { id: string; rootId: string };
   items: Item[];
@@ -246,6 +250,10 @@ export function makeWorld(
     proposals.push(proposal);
   }
 
+  // A durable-revision seam matching the real Organiser wiring (R1/F4):
+  // approvals validate against the persisted reviewed revision, which a test
+  // may advance to simulate a curation edit between effects.
+  let durableTaxonomyRevision = 1;
   const helper = new RecordingHelper();
   let now = new Date('2026-10-07T10:00:00.000Z');
   const clock = () => now;
@@ -255,6 +263,8 @@ export function makeWorld(
     helper,
     clock,
     destinations,
+    currentTaxonomyRevision: () => durableTaxonomyRevision,
+    currentPolicyRevision: () => 1,
     faultHook(point) {
       if (fault !== null && fault.point === point && fault.times > 0) {
         fault.times -= 1;
@@ -276,7 +286,14 @@ export function makeWorld(
 
   /** A "restarted" service on the same database, with no fault injection. */
   const restart = (): ApplicationService =>
-    new ApplicationServiceImpl({ repositories, helper, clock, destinations });
+    new ApplicationServiceImpl({
+      repositories,
+      helper,
+      clock,
+      destinations,
+      currentTaxonomyRevision: () => durableTaxonomyRevision,
+      currentPolicyRevision: () => 1,
+    });
 
   return {
     dir,
@@ -287,6 +304,9 @@ export function makeWorld(
       const current = destinations.get(destinationId);
       if (current === undefined) throw new Error(`unknown destination ${destinationId}`);
       destinations.set(destinationId, { ...current, device, inode });
+    },
+    setTaxonomyRevision(revision: number) {
+      durableTaxonomyRevision = revision;
     },
     root,
     batch,

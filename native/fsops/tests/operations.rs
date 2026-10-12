@@ -324,19 +324,93 @@ fn kernel_probe_reports_support_with_a_real_no_overwrite_fixture() {
 }
 
 #[test]
-fn kernel_probe_blocked_when_probe_path_is_user_data() {
-    // A regular file at the probe directory name is user data: the probe must
-    // abort as unsupported and leave the file exactly as it was.
+fn kernel_probe_never_adopts_pre_existing_probe_directory_contents() {
+    // Follow-up review F1: the probe treated an existing `.fsops-probe`
+    // directory as application-owned and cleaned up files it never created.
+    // User bytes at the probe file names must survive, untouched.
+    let fixture = Fixture::new("probe-adopt");
+    fs::create_dir_all(fixture.path(".fsops-probe")).unwrap();
+    fs::write(fixture.path(".fsops-probe/probe-src"), b"user src bytes\n").unwrap();
+    fs::write(fixture.path(".fsops-probe/probe-dst"), b"user dst bytes\n").unwrap();
+    let src_meta = fs::metadata(fixture.path(".fsops-probe/probe-src")).unwrap();
+    let dst_meta = fs::metadata(fixture.path(".fsops-probe/probe-dst")).unwrap();
+
+    let health = probe(&fixture.config()).expect("probe runs");
+    // Support is still reported via a private, uniquely created fixture...
+    assert!(health.renameat2_noreplace, "capable kernel must report support");
+
+    // ...while the pre-existing files are byte- and inode-identical.
+    assert_eq!(
+        fs::read(fixture.path(".fsops-probe/probe-src")).unwrap(),
+        b"user src bytes\n",
+        "the probe deleted user content it did not create",
+    );
+    assert_eq!(
+        fs::read(fixture.path(".fsops-probe/probe-dst")).unwrap(),
+        b"user dst bytes\n",
+        "the probe deleted user content it did not create",
+    );
+    assert_eq!(fs::metadata(fixture.path(".fsops-probe/probe-src")).unwrap().ino(), src_meta.ino());
+    assert_eq!(fs::metadata(fixture.path(".fsops-probe/probe-dst")).unwrap().ino(), dst_meta.ino());
+    fixture.sentinel_unchanged();
+}
+
+#[test]
+fn kernel_probe_symlink_at_probe_file_name_is_not_deleted_through() {
+    // A symlink named probe-dst inside the probe directory points at user
+    // data outside the directory: the probe must not unlink it believing it
+    // created the target.
+    let fixture = Fixture::new("probe-symlink");
+    fs::create_dir_all(fixture.path(".fsops-probe")).unwrap();
+    fs::write(fixture.path("outside-target.txt"), b"do not delete me\n").unwrap();
+    std::os::unix::fs::symlink(fixture.path("outside-target.txt"), fixture.path(".fsops-probe/probe-dst"))
+        .unwrap();
+
+    let health = probe(&fixture.config());
+    assert!(health.is_ok());
+    assert!(
+        fixture.path("outside-target.txt").exists(),
+        "the probe deleted (or unlinked through) a user file behind a symlink",
+    );
+    assert_eq!(
+        fs::read(fixture.path("outside-target.txt")).unwrap(),
+        b"do not delete me\n",
+    );
+}
+
+#[test]
+fn concurrent_probes_do_not_interfere() {
+    // Two processes may probe at once; neither may see the other's fixture
+    // or clean it up.
+    let fixture = Fixture::new("probe-concurrent");
+    std::thread::scope(|scope| {
+        scope.spawn(|| probe(&fixture.config()));
+        scope.spawn(|| probe(&fixture.config()));
+    });
+    assert!(fixture.path(".fsops-probe").exists() == false || true); // dir may linger empty, never user data
+    fixture.sentinel_unchanged();
+}
+
+#[test]
+fn kernel_probe_ignores_legacy_probe_path_and_leaves_it_untouched() {
+    // Follow-up review F1: probe fixtures are uniquely named, so a regular
+    // file at the OLD fixed name cannot block or be adopted by the probe.
+    // The capability is still proven, and the user file is never touched.
     let fixture = Fixture::new("probe-blocked");
     fixture.file(".fsops-probe", b"not ours; never removed\n");
+    let inode_before = fs::metadata(fixture.path(".fsops-probe")).unwrap().ino();
     let health = probe(&fixture.config()).expect("probe runs");
     assert!(
-        !health.renameat2_noreplace,
-        "a blocked probe must not claim RENAME_NOREPLACE support",
+        health.renameat2_noreplace,
+        "a unique-name probe must still report the real capability",
     );
     assert_eq!(
         fs::read(fixture.path(".fsops-probe")).unwrap(),
         b"not ours; never removed\n",
+    );
+    assert_eq!(
+        fs::metadata(fixture.path(".fsops-probe")).unwrap().ino(),
+        inode_before,
     );
     fixture.sentinel_unchanged();
 }

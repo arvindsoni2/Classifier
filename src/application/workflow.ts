@@ -119,6 +119,7 @@ const WRITER_LOCK_STALE_MS = 60_000;
 const DEFINITE_REFUSALS = new Set([
   'COLLISION',
   'OUT_OF_SCOPE',
+  'NOT_FOUND',
   'OVERSIZE',
   'CROSS_MOUNT',
   'STALE',
@@ -131,9 +132,11 @@ function isDefiniteRefusal(failure: { code: string }): boolean {
   return DEFINITE_REFUSALS.has(failure.code);
 }
 
-/** A missing location is the only reading that means "absent". */
+/** A confirmed-missing location (ENOENT) is the only reading that means
+ * "absent"; symlink/type/mount refusals (OUT_OF_SCOPE) are unobservable
+ * and must never be mistaken for an empty location (spec review F5). */
 function isDefiniteAbsence(failure: { code: string }): boolean {
-  return failure.code === 'OUT_OF_SCOPE';
+  return failure.code === 'NOT_FOUND';
 }
 
 /**
@@ -418,6 +421,22 @@ export class ApplicationService {
           });
           continue;
         }
+        // Per-effect revalidation (spec review F4): the approval was checked
+        // once at batch entry, but an ordinary edit, rejection, taxonomy
+        // review or expiry between actions must stop every LATER effect.
+        // Invalidation ends the run; remaining actions are refused, not run.
+        if (!this.approvalValid(approval.id)) {
+          const remaining = selected.slice(results.length);
+          for (const refused of remaining) {
+            results.push({
+              actionId: refused.proposalId,
+              proposalId: refused.proposalId,
+              outcome: 'stale' as ActionOutcome,
+              detail: 'the approval no longer matches current state (edit, rejection, revision change or expiry); nothing further executed',
+            });
+          }
+          break;
+        }
         results.push(await this.runApplyAction(batch, approval.id, action));
       }
       return { batchId, results };
@@ -485,11 +504,16 @@ export class ApplicationService {
         detail: 'cancellation was requested and the action cannot be resolved against the catalogue',
       };
     }
+    // The immutable journalled fields win over the mutable proposal row.
+    const stored = this.repositories.actions.get(record.id);
+    const sourceBasename = stored?.sourceBasename ?? proposal.basename;
+    const targetSegments = stored?.targetSegments ?? destination.segments;
     const expected =
-      record.mode === 'apply'
+      stored?.expectedSnapshot ??
+      (record.mode === 'apply'
         ? proposal.expected
-        : (this.appliedAfter({ proposalId: record.proposalId, proposalVersion: record.proposalVersion }) ?? proposal.expected);
-    const observed = await this.observe(root, proposal.basename, destination.segments);
+        : (this.appliedAfter({ proposalId: record.proposalId, proposalVersion: record.proposalVersion }) ?? proposal.expected));
+    const observed = await this.observe(root, sourceBasename, targetSegments);
     if (!observed.ok) {
       this.repositories.actions.update(record.id, { state: 'canceled' });
       return {
@@ -499,10 +523,17 @@ export class ApplicationService {
         detail: `cancellation was requested; ${observed.detail}`,
       };
     }
+    // For an undo the EFFECT location is the original inbox name, so the
+    // observed roles swap — cancellation of a completed undo resolves to
+    // `undone`, never a blind `canceled` (spec review F5).
+    const observations =
+      record.mode === 'undo'
+        ? { source: observed.value.target, target: observed.value.source }
+        : observed.value;
     // approvalValid false: cancellation never re-runs an effect.
     const outcome = reconcileAction(
       this.reconcileRecord(record, proposal, destination, expected, false),
-      observed.value,
+      observations,
     );
     if (outcome.ok && outcome.value.kind === 'applied') {
       return this.commitReconciledEffect(record, proposal, destination, outcome.value.after);
@@ -854,6 +885,23 @@ export class ApplicationService {
     this.faultHook?.('after-rename', { actionId, proposalId: action.proposalId });
 
     if (!result.ok) {
+      // A definite refusal (verified pre-effect) is terminal; an uncertain
+      // failure (transport/timeout/post-effect class) may have moved the
+      // file: the record stays non-terminal for reconciliation, never a
+      // blind terminal conflict (spec review F5).
+      if (!isDefiniteRefusal(result)) {
+        this.repositories.actions.appendEvent(actionId, {
+          event: 'uncertain_effect',
+          recordedAt: this.clock().toISOString(),
+          payloadJson: JSON.stringify({ code: result.code, detail: result.detail }),
+        });
+        return {
+          actionId,
+          proposalId: action.proposalId,
+          outcome: 'conflict',
+          detail: `${result.code}: ${result.detail}; effect uncertain, reconciliation required`,
+        };
+      }
       this.repositories.transaction(() => {
         this.repositories.actions.update(actionId, { state: 'conflict' });
         this.repositories.actions.appendEvent(actionId, {
@@ -1208,9 +1256,10 @@ export class ApplicationService {
       if (undoAction !== null && undoAction.state === 'undone' && undoAction.receiptJson !== null) {
         return ok(JSON.parse(undoAction.receiptJson) as MoveReceipt);
       }
-      // An existing non-terminal intent is reconciled against reality before
-      // any retry (spec review R5): a previous attempt may already have moved
-      // the file, and blind re-invocation could double-reverse it.
+      // An existing non-terminal intent is reconciled against reality and
+      // its outcome RETURNED (spec review F5): a reconcile that does not end
+      // in `undone` must never fall through into a second attempt inside the
+      // same request, or one request multiplies helper calls.
       if (undoAction !== null && !TERMINAL_STATES.has(undoAction.state)) {
         const reconciled = await this.resumeUndoAction({ id: batch.id, rootId: batch.rootId }, {
           id: undoAction.id,
@@ -1220,6 +1269,10 @@ export class ApplicationService {
         if (reconciled.outcome === 'undone' && reconciled.receipt !== undefined) {
           return ok(reconciled.receipt);
         }
+        return err(
+          reconciled.outcome === 'stale' ? 'STALE' : 'CONFLICT',
+          reconciled.detail ?? 'the undo could not be reconciled; retry after reviewing the journal',
+        );
       }
       const undoActionId = undoAction?.id ?? `action-${randomUUID()}`;
       this.faultHook?.('before-undo-intent', { actionId: undoActionId, proposalId: action.proposalId });

@@ -367,16 +367,17 @@ pub fn mkdirat_exclusive(
     })
 }
 
-/// Name of the application-owned probe directory inside the root. The probe
-/// only ever creates, inspects and removes names inside this directory; a
-/// collision with user data aborts the probe instead of touching the data.
-const PROBE_DIR: &str = ".fsops-probe";
+/// Prefix for the application-owned probe fixture directories. Each attempt
+/// gets a UNIQUE directory (pid + nanotimestamp) created exclusively, so a
+/// probe can never adopt a pre-existing directory or file by name (follow-up
+/// review F1). Only names whose inode this attempt created are removed.
+const PROBE_PREFIX: &str = ".fsops-probe-";
 const PROBE_SRC: &str = "probe-src";
 const PROBE_DST: &str = "probe-dst";
 
 /// Verifies the mandatory primitives. `renameat2_noreplace` is proven with a
-/// real no-overwrite fixture inside an application-owned directory, never by
-/// renaming a name the application does not own.
+/// real no-overwrite fixture inside a uniquely created application-owned
+/// directory, never by renaming or deleting anything that pre-existed.
 pub fn probe_kernel(root: &RootHandle) -> KernelCaps {
     let openat2 = match openat2_errno(root.fd(), ".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) {
         Ok(_) => true,
@@ -397,107 +398,135 @@ enum ProbeOutcome {
     Unavailable,
 }
 
+/// A created file the probe may clean up: name plus the inode captured at
+/// creation. Cleanup verifies the current inode before unlinking, so a file
+/// replaced between creation and cleanup is never deleted blind.
+struct ProbeFile {
+    name: &'static str,
+    inode: u64,
+}
+
 /// Creates two probe files the application owns and requires an overwriting
 /// rename of one onto the other to fail with EEXIST. rc == 0 would mean an
 /// overwrite succeeded, so the flag is not enforced and apply must be
 /// disabled — there is deliberately no fallback to an ordinary rename.
 fn probe_rename_noreplace(root: &RootHandle) -> bool {
-    match probe_fixture(root) {
-        ProbeOutcome::Enforced => true,
-        ProbeOutcome::NotEnforced | ProbeOutcome::Unavailable => false,
-    }
+    matches!(probe_fixture(root), ProbeOutcome::Enforced)
 }
 
 fn probe_fixture(root: &RootHandle) -> ProbeOutcome {
-    let probe_dir = match open_probe_dir(root) {
+    // A uniquely named directory, created exclusively. If it exists, it is
+    // not ours: retry once with a fresh name, else give up — never adopt it.
+    let dir_name = unique_probe_dir_name();
+    let opened = match create_probe_dir(root, &dir_name) {
         Some(dir) => dir,
         None => return ProbeOutcome::Unavailable,
     };
-    if !create_probe_file(&probe_dir, PROBE_SRC) || !create_probe_file(&probe_dir, PROBE_DST) {
-        remove_probe_fixture(root, &probe_dir);
-        return ProbeOutcome::Unavailable;
-    }
 
-    let outcome = {
-        let src = CString::new(PROBE_SRC).unwrap();
-        let dst = CString::new(PROBE_DST).unwrap();
-        let rc = unsafe {
-            libc::syscall(
-                libc::SYS_renameat2,
-                probe_dir.as_raw_fd(),
-                src.as_ptr(),
-                probe_dir.as_raw_fd(),
-                dst.as_ptr(),
-                RENAME_NOREPLACE,
-            )
-        };
-        if rc == -1 {
-            let errno = unsafe { *libc::__errno_location() };
-            match errno {
-                libc::EEXIST => ProbeOutcome::Enforced,
-                libc::ENOSYS | libc::EINVAL | libc::EOPNOTSUPP => {
-                    ProbeOutcome::NotEnforced
-                }
-                _ => ProbeOutcome::Unavailable,
-            }
-        } else {
-            // An overwriting rename succeeded: the flag is not enforced.
-            ProbeOutcome::NotEnforced
-        }
-    };
-    remove_probe_fixture(root, &probe_dir);
+    let mut created: Vec<ProbeFile> = Vec::new();
+    let outcome = run_probe_rename(root, &opened, &dir_name, &mut created);
+    cleanup_probe_files(&opened, &created);
+    // The directory was created by this attempt; remove it if still ours.
+    cleanup_probe_dir(root, &dir_name);
     outcome
 }
 
-/// Opens (creating when absent) the application-owned probe directory. A
-/// non-directory at that name is user data: never replaced, never removed.
-fn open_probe_dir(root: &RootHandle) -> Option<File> {
-    match openat2_errno(root.fd(), PROBE_DIR, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) {
-        Ok(dir) => return Some(dir),
-        Err(libc::ENOENT) => {}
-        Err(_) => return None,
-    }
-    let name = CString::new(PROBE_DIR).unwrap();
-    let rc = unsafe { libc::mkdirat(root.fd(), name.as_ptr(), 0o700) };
-    if rc == -1 {
-        let errno = unsafe { *libc::__errno_location() };
-        if errno != libc::EEXIST {
-            return None;
-        }
-    }
-    openat2_errno(root.fd(), PROBE_DIR, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC).ok()
+fn unique_probe_dir_name() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{}{}-{}", PROBE_PREFIX, std::process::id(), nanos)
 }
 
-/// Creates an exclusively-owned probe file; an existing regular file from a
-/// crashed earlier probe is reused, anything else aborts the probe.
-fn create_probe_file(dir: &File, name: &str) -> bool {
+/// mkdirat with fresh-unique name: EEXIST here means the name was taken
+/// (never by us in this run); treat as unavailable, do not reuse.
+fn create_probe_dir(root: &RootHandle, name: &str) -> Option<std::fs::File> {
+    let c_name = CString::new(name).ok()?;
+    let rc = unsafe { libc::mkdirat(root.fd(), c_name.as_ptr(), 0o700) };
+    if rc == -1 {
+        return None;
+    }
+    openat2_errno(root.fd(), name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC).ok()
+}
+
+fn run_probe_rename(
+    root: &RootHandle,
+    dir: &std::fs::File,
+    dir_name: &str,
+    created: &mut Vec<ProbeFile>,
+) -> ProbeOutcome {
+    let _ = root;
+    let _ = dir_name;
+    for name in [PROBE_SRC, PROBE_DST] {
+        match create_probe_file(dir, name) {
+            Some(inode) => created.push(ProbeFile { name, inode }),
+            None => return ProbeOutcome::Unavailable,
+        }
+    }
+
+    let src = CString::new(PROBE_SRC).unwrap();
+    let dst = CString::new(PROBE_DST).unwrap();
+    let rc = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            dir.as_raw_fd(),
+            src.as_ptr(),
+            dir.as_raw_fd(),
+            dst.as_ptr(),
+            RENAME_NOREPLACE,
+        )
+    };
+    if rc == -1 {
+        let errno = unsafe { *libc::__errno_location() };
+        match errno {
+            libc::EEXIST => ProbeOutcome::Enforced,
+            libc::ENOSYS | libc::EINVAL | libc::EOPNOTSUPP => ProbeOutcome::NotEnforced,
+            _ => ProbeOutcome::Unavailable,
+        }
+    } else {
+        // An overwriting rename succeeded: the flag is not enforced.
+        ProbeOutcome::NotEnforced
+    }
+}
+
+/// Creates one exclusively-owned probe file; returns its inode. EEXIST means
+/// something already occupies the name (impossible in a fresh directory, but
+/// checked anyway): the probe refuses and cleans up only its own creations.
+fn create_probe_file(dir: &File, name: &'static str) -> Option<u64> {
     match openat2_errno(
         dir.as_raw_fd(),
         name,
         O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
     ) {
-        Ok(_) => true,
-        Err(libc::EEXIST) => match openat2_errno(dir.as_raw_fd(), name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC) {
-            Ok(existing) => match fstat_of(existing.as_raw_fd()) {
-                Ok(stat) => is_regular(&stat),
-                Err(_) => false,
-            },
-            Err(_) => false,
-        },
-        Err(_) => false,
+        Ok(file) => fstat_of(file.as_raw_fd()).ok().map(|stat| stat.st_ino as u64),
+        Err(_) => None,
     }
 }
 
-/// Removes only the probe files this function created and the probe directory
-/// when it is empty. Unknown names are never deleted; failures are ignored
-/// because a leftover probe directory is harmless and blocks no operation.
-fn remove_probe_fixture(root: &RootHandle, dir: &File) {
-    for name in [PROBE_SRC, PROBE_DST] {
-        let c_name = CString::new(name).unwrap();
-        unsafe { libc::unlinkat(dir.as_raw_fd(), c_name.as_ptr(), 0) };
+/// Removes exactly the files this attempt created — and only while their
+/// current inode still matches the creation-time inode. A name reused or
+/// replaced in between is left in place rather than deleted blind.
+fn cleanup_probe_files(dir: &File, created: &[ProbeFile]) {
+    for file in created {
+        let c_name = CString::new(file.name).unwrap();
+        let verified = openat2_errno(dir.as_raw_fd(), file.name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+            .ok()
+            .and_then(|handle| fstat_of(handle.as_raw_fd()).ok())
+            .map(|stat| stat.st_ino as u64 == file.inode)
+            .unwrap_or(false);
+        if verified {
+            unsafe { libc::unlinkat(dir.as_raw_fd(), c_name.as_ptr(), 0) };
+        }
     }
-    let c_dir = CString::new(PROBE_DIR).unwrap();
-    unsafe { libc::unlinkat(root.fd(), c_dir.as_ptr(), libc::AT_REMOVEDIR) };
+}
+
+fn cleanup_probe_dir(root: &RootHandle, name: &str) {
+    let c_name = CString::new(name).unwrap();
+    let rc = unsafe { libc::unlinkat(root.fd(), c_name.as_ptr(), libc::AT_REMOVEDIR) };
+    // ENOTEMPTY is acceptable: a leftover hidden probe directory is harmless
+    // and blocks no operation; anything still inside it is NOT ours to delete.
+    let _ = rc;
 }
 
 /// Kernel release string for health reports.
