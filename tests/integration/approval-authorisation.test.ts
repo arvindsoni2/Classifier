@@ -120,9 +120,11 @@ describe('approval authorisation (R1)', () => {
     const taxonomy = organiser.getTaxonomy();
     expect(taxonomy.ok).toBe(true);
     if (!taxonomy.ok) return;
-    const invoiceCategory = taxonomy.value.tree.find((category) => category.kind === 'existing');
-    expect(invoiceCategory).toBeDefined();
-    const destinationId = invoiceCategory?.destinationId ?? '';
+    // F2: discovery no longer populates the active tree; take the real
+    // destination identity from the physical catalogue instead.
+    const discovered = taxonomy.value.destinations.find((destination) => destination.segments[0] === 'Documents');
+    expect(discovered).toBeDefined();
+    const destinationId = discovered?.id ?? '';
     const proposal = seedProposal(repositories, scanned.rootId, 'invoice-01.txt', 'first invoice\n', destinationId, taxonomy.value.revision);
     const batchId = repositories.batches.listByRoot(scanned.rootId)[0]?.id ?? '';
     const approved = organiser.service.createApproval(

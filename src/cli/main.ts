@@ -153,18 +153,34 @@ export async function runCli(argv: readonly string[], options: CliOptions): Prom
         // Display the active taxonomy, its curation status and the discovered
         // destination catalogue; `--review` approves the current tree through
         // the same service the UI uses (spec review R9).
+        await organiser.refreshCatalogue();
         const taxonomy = organiser.getTaxonomy();
         if (!taxonomy.ok) {
           console.error(`${taxonomy.code}: ${taxonomy.detail}`);
           return 1;
         }
         if (rest[0] === '--review') {
-          const mappings = taxonomy.value.tree
+          // Reviewing the SEED tree would approve a routing-less taxonomy, so
+          // an un-reviewed tree is completed from the discovery suggestion
+          // here — an explicit, revisioned act (spec review F2).
+          let tree = taxonomy.value.tree;
+          if (taxonomy.value.reviewed === false) {
+            const suggestion = organiser.suggestTaxonomy();
+            if (!suggestion.ok) {
+              console.error(
+                `INVALID_DECISION: cannot auto-suggest a taxonomy (${suggestion.detail}); ` +
+                  'curate it in the review UI and approve explicitly',
+              );
+              return 1;
+            }
+            tree = suggestion.value;
+          }
+          const mappings = tree
             .filter((node) => node.destinationId !== null)
             .map((node) => ({ categoryId: node.id, destinationId: node.destinationId as string }));
           const reviewed = await organiser.replaceTaxonomy({
             expectedRevision: taxonomy.value.revision,
-            tree: taxonomy.value.tree,
+            tree,
             mappings,
           });
           if (!reviewed.ok) {

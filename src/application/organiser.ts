@@ -120,8 +120,10 @@ export class Organiser {
   private readonly clock: () => Date;
   private readonly destinations = new Map<Id, { id: Id; segments: string[]; device: string; inode: string; status: 'observed' | 'approved' }>();
   private readonly taxonomy: Taxonomy;
-  /** Why the automatic taxonomy rebuild was refused, when it was (R9). */
-  private taxonomyStatus: { state: 'ok' } | { state: 'curation_required'; reason: string } = { state: 'ok' };
+  /** Why the automatic suggestion cannot be used, when it cannot (F2). */
+  private suggestionStatus: { state: 'ok' } | { state: 'curation_required'; reason: string } = { state: 'ok' };
+  /** A valid auto-suggestion from discovery, never the active tree (F2). */
+  private suggestedTree: Category[] = [];
   private readonly configuredRootPath: string | undefined;
   private root: RootConfig | null = null;
   readonly service: ApplicationService;
@@ -192,8 +194,11 @@ export class Organiser {
     this.configuredRootPath = options.rootPath;
     if (options.rootPath !== undefined) {
       // Root resolution failures must surface, never fall back silently to
-      // the real ~/Downloads during automated runs.
-      void this.ensureRoot(options.rootPath).catch(() => undefined);
+      // the real ~/Downloads during automated runs. A fresh process primes
+      // the physical catalogue so display and suggestions work before a scan.
+      void this.ensureRoot(options.rootPath)
+        .then(() => this.refreshCatalogue())
+        .catch(() => undefined);
     }
   }
 
@@ -231,8 +236,8 @@ export class Organiser {
   }
 
 
-  /** Re-discovers the destination catalogue and rebuilds the taxonomy. */
-  private async refreshCatalogue(): Promise<void> {
+  /** Re-discovers the destination catalogue; the semantic tree is never touched (F2). */
+  async refreshCatalogue(): Promise<void> {
     const root = await this.ensureRoot();
     const directories = await this.source.discoverDirectories(root);
     if (!directories.ok) throw new Error(`${directories.code}: ${directories.detail}`);
@@ -240,7 +245,7 @@ export class Organiser {
     for (const destination of directories.value) {
       this.destinations.set(destination.id, destination);
     }
-    this.rebuildTaxonomy();
+    this.refreshSuggestion();
   }
 
   /** Read-only scan: discovery + directory catalogue + item persistence. */
@@ -271,18 +276,24 @@ export class Organiser {
     // Per-batch membership: a later classification run classifies what THIS
     // scan observed, not every historic revision under the root.
     this.repositories.items.addToBatch(batch.id, scannedItemIds);
-    this.rebuildTaxonomy();
+    this.refreshSuggestion();
     return { batchId: batch.id, rootId: root.rootId, candidates, deferred, directories: directories.value.length };
   }
 
-  /** Rebuilds the in-memory taxonomy from the discovery catalogue. */
-  private rebuildTaxonomy(): void {
-    const tree = [...this.taxonomy.tree];
+  /**
+   * Computes the SUGGESTED tree from the discovery catalogue (spec review
+   * F2). Discovery must never mutate the approved semantic tree: the active
+   * tree changes only through an explicit, revisioned, persisted review.
+   * A suggestion that cannot be valid (e.g. more than seven folders beneath
+   * one group) is reported as a status, not swallowed and not adopted.
+   */
+  private refreshSuggestion(): void {
+    const tree: Category[] = [
+      { id: 'root', parentId: null, label: 'Inbox', description: 'Root grouping', destinationId: null, kind: 'group' },
+    ];
     for (const destination of this.destinations.values()) {
-      const id = `cat-${destination.id}`;
-      if (tree.some((category) => category.id === id)) continue;
       tree.push({
-        id,
+        id: `cat-${destination.id}`,
         parentId: 'root',
         label: destination.segments[destination.segments.length - 1] ?? destination.id,
         description: `${destination.segments.at(-1) ?? ''} ${singular(destination.segments.at(-1) ?? '')} documents`,
@@ -293,14 +304,21 @@ export class Organiser {
     const destinations = [...this.destinations.values()];
     const validated = validateTaxonomy(tree, destinations);
     if (validated.ok) {
-      this.taxonomy.tree = validated.value.tree;
-      this.taxonomy.mappingHash = validated.value.mappingHash;
-      this.taxonomyStatus = { state: 'ok' };
+      this.suggestedTree = validated.value.tree;
+      this.suggestionStatus = { state: 'ok' };
       return;
     }
-    // The auto-built tree was refused (e.g. more than seven folders under a
-    // group): the reason is surfaced, never swallowed (spec review R9).
-    this.taxonomyStatus = { state: 'curation_required', reason: validated.detail };
+    this.suggestedTree = [];
+    this.suggestionStatus = { state: 'curation_required', reason: validated.detail };
+  }
+
+  /** The active tree's own curation status, based on its mapped destinations. */
+  private activeTreeStatus(): { state: 'ok' } | { state: 'curation_required'; reason: string } {
+    if (this.suggestionStatus.state !== 'ok') return this.suggestionStatus;
+    if (this.repositories.taxonomies.latest() === null) {
+      return { state: 'curation_required', reason: 'the taxonomy has not been reviewed yet' };
+    }
+    return { state: 'ok' };
   }
 
   /** Extraction + typed decisions + planning for every scanned item. */
@@ -314,9 +332,10 @@ export class Organiser {
     // A reviewed taxonomy is a precondition (spec review R9): routing into an
     // unreviewed or refused tree would invent destinations. The message says
     // exactly what to do instead of failing per item.
-    if (this.taxonomyStatus.state !== 'ok') {
+    const activeStatus = this.activeTreeStatus();
+    if (activeStatus.state !== 'ok') {
       throw new Error(
-        `OUT_OF_SCOPE: taxonomy curation required (${this.taxonomyStatus.reason}); ` +
+        `OUT_OF_SCOPE: taxonomy curation required (${activeStatus.reason}); ` +
           'review the taxonomy in the UI before classifying',
       );
     }
@@ -753,7 +772,7 @@ export class Organiser {
       this.clock().toISOString(),
     );
     this.repositories.proposals.markStaleBeforeRevision(previousRevision + 1);
-    this.taxonomyStatus = { state: 'ok' };
+    this.refreshSuggestion();
     return ok({ revision: this.taxonomy.revision, mappingHash: validated.value.mappingHash });
   }
 
@@ -770,22 +789,45 @@ export class Organiser {
     status: { state: 'ok' } | { state: 'curation_required'; reason: string };
     reviewed: boolean;
     destinations: { id: Id; segments: string[] }[];
+    /** Discovered destinations NOT referenced by the active tree (F2). */
+    unmapped: { id: Id; segments: string[] }[];
+    /** The auto-suggestion from discovery, empty when it cannot be valid. */
+    suggested: Category[];
     /** The resolved organisation root, for readable target paths (R13). */
     root: string;
   }> {
+    const mapped = new Set(
+      this.taxonomy.tree.map((node) => node.destinationId).filter((id): id is Id => id !== null),
+    );
     return ok({
       revision: this.taxonomy.revision,
       tree: this.taxonomy.tree,
       mappingHash: this.taxonomy.mappingHash,
-      status: this.taxonomyStatus,
+      status: this.activeTreeStatus(),
       // An explicitly reviewed taxonomy is a persisted one; the seed tree is not.
       reviewed: this.repositories.taxonomies.latest() !== null,
       destinations: [...this.destinations.values()].map((destination) => ({
         id: destination.id,
         segments: destination.segments,
       })),
+      unmapped: [...this.destinations.values()]
+        .filter((destination) => !mapped.has(destination.id))
+        .map((destination) => ({ id: destination.id, segments: destination.segments })),
+      suggested: this.suggestedTree,
       root: this.root?.absolutePath ?? '',
     });
+  }
+
+  /**
+   * The suggested curated tree from discovery (spec review F2): a starting
+   * point for review, never an active-tree mutation. Refused with the real
+   * reason when more destinations exist than one group may hold.
+   */
+  suggestTaxonomy(): Result<Category[]> {
+    if (this.suggestionStatus.state !== 'ok') {
+      return { ok: false, code: 'INVALID_DECISION', detail: this.suggestionStatus.reason };
+    }
+    return ok(this.suggestedTree);
   }
 
   /** HTTP surface: classification for a batch (provider + profile). */

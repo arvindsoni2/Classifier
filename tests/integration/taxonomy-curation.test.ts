@@ -27,8 +27,11 @@ function world(label: string, folders: string[]): { rootDir: string; dbPath: str
 }
 
 describe('taxonomy curation (R9)', () => {
-  it('surfaces why the automatic tree was refused instead of ignoring it', async () => {
+  it('surfaces why the automatic suggestion cannot be used instead of swallowing it', async () => {
     // Nine folders cannot map under one group (MAX_CHILDREN_PER_NODE = 7).
+    // Follow-up review F2: discovery no longer mutates the semantic tree at
+    // all — the overflow is surfaced as an unusable suggestion while the
+    // active tree stays seed, and classification remains gated.
     const { rootDir, dbPath } = world('too-many', ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I']);
     const organiser = new Organiser({ dbPath, rootPath: rootDir, stabilityWindowMs: 0 });
     await organiser.scan();
@@ -36,14 +39,80 @@ describe('taxonomy curation (R9)', () => {
     const taxonomy = organiser.getTaxonomy();
     expect(taxonomy.ok).toBe(true);
     if (!taxonomy.ok) return;
-    // The refusal is visible, with the reason and the discovered catalogue.
-    expect(taxonomy.value.status.state).toBe('curation_required');
-    if (taxonomy.value.status.state === 'curation_required') {
-      expect(taxonomy.value.status.reason).toMatch(/more than 7 children/i);
-    }
+    // Discovery is physical only: the active tree still holds just the root.
+    expect(taxonomy.value.tree.filter((node) => node.parentId === 'root')).toHaveLength(0);
     expect(taxonomy.value.reviewed).toBe(false);
     expect(taxonomy.value.destinations.length).toBeGreaterThanOrEqual(9);
+    if (taxonomy.value.status.state !== 'ok') {
+      expect(taxonomy.value.status.reason).toMatch(/more than 7/i);
+    } else {
+      expect.fail('nine folders must leave the suggestion unusable');
+    }
+    // The suggestion refuses to pretend nine folders fit under one group...
+    const suggestion = organiser.suggestTaxonomy();
+    expect(suggestion.ok).toBe(false);
+    // ...and classification is gated until a curated tree is reviewed.
+    await expect(organiser.classify(undefined, 'rules')).rejects.toThrow(/curation required/i);
     organiser.close();
+  }, 60_000);
+
+  it('keeps a curated tree stable across refresh, classify, scan and restart (F2)', async () => {
+    const { rootDir, dbPath } = world('stable-tree', ['Invoices', 'Media', 'Extra1', 'Extra2', 'Extra3', 'Extra4']);
+    const organiser = new Organiser({ dbPath, rootPath: rootDir, stabilityWindowMs: 0 });
+    await organiser.scan();
+    const taxonomy = organiser.getTaxonomy();
+    if (!taxonomy.ok) throw new Error(taxonomy.detail);
+    const invoices = taxonomy.value.destinations.find((entry) => entry.segments[0] === 'Invoices');
+    expect(invoices).toBeDefined();
+
+    // Curate ONLY the Invoices destination under a custom id, as the pilot does.
+    const curated = await organiser.replaceTaxonomy({
+      expectedRevision: taxonomy.value.revision,
+      tree: [
+        { id: 'root', parentId: null, label: 'Inbox', description: 'Root grouping', destinationId: null, kind: 'group' },
+        {
+          id: 'cat-billing-custom',
+          parentId: 'root',
+          label: 'Billing',
+          description: 'Billing invoice documents',
+          destinationId: invoices?.id ?? '',
+          kind: 'existing',
+        },
+      ],
+      mappings: [{ categoryId: 'cat-billing-custom', destinationId: invoices?.id ?? '' }],
+    });
+    expect(curated.ok).toBe(true);
+    if (!curated.ok) return;
+    const revision = curated.value.revision;
+
+    writeFileSync(join(rootDir, 'invoice-01.txt'), 'first invoice\n', 'utf8');
+    const classified = await organiser.classify(undefined, 'rules');
+    expect(classified.failed).toBe(0);
+    expect(classified.proposals).toBe(1);
+
+    // Refresh paths must not append the other five folders nor bump revision.
+    const after = organiser.getTaxonomy();
+    if (!after.ok) throw new Error(after.detail);
+    expect(after.value.revision).toBe(revision);
+    expect(after.value.tree.map((node) => node.id).sort()).toEqual(['cat-billing-custom', 'root']);
+    // The other destinations are surfaced separately, never merged.
+    expect(after.value.unmapped.length).toBeGreaterThanOrEqual(1);
+
+    await organiser.scan();
+    const afterScan = organiser.getTaxonomy();
+    if (!afterScan.ok) throw new Error(afterScan.detail);
+    expect(afterScan.value.tree.map((node) => node.id).sort()).toEqual(['cat-billing-custom', 'root']);
+    expect(afterScan.value.revision).toBe(revision);
+    organiser.close();
+
+    const restarted = new Organiser({ dbPath, rootPath: rootDir, stabilityWindowMs: 0 });
+    await restarted.scan();
+    const afterRestart = restarted.getTaxonomy();
+    if (!afterRestart.ok) throw new Error(afterRestart.detail);
+    expect(afterRestart.value.tree.map((node) => node.id).sort()).toEqual(['cat-billing-custom', 'root']);
+    expect(afterRestart.value.revision).toBe(revision);
+    expect(afterRestart.value.reviewed).toBe(true);
+    restarted.close();
   }, 60_000);
 
   it('refuses classification until the taxonomy is reviewed', async () => {

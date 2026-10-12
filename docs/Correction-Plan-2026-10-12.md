@@ -38,7 +38,7 @@ section below — a checked box never covers a missing feature.
 
 ## Phase 2 — Usable pilot (F2, F3, F7)
 
-- [ ] **F2** Discovery updates only the physical catalogue. The approved
+- [x] **F2** Discovery updates only the physical catalogue. The approved
   semantic tree changes only through a revisioned explicit review; refresh
   never appends destinations and never classifies against a silently mutated
   tree. New/missing destinations are surfaced separately (`unmapped`,
