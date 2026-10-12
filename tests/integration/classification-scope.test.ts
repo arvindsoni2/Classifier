@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
@@ -70,6 +70,47 @@ describe('classification scope (R3)', () => {
     expect(result.conflicts?.map((entry) => entry.basename)).toContain('invoice-02.txt');
     const proposals = await organiser.listProposals();
     expect(proposals.ok && proposals.value.proposals).toHaveLength(0);
+    organiser.close();
+  }, 60_000);
+
+  it('does not leak descriptors across repeated refusals (F8)', async () => {
+    const { rootDir, dbPath } = world('fd-leak');
+    writeFileSync(join(rootDir, 'invoice-09.txt'), 'invoice for hosting services\n', 'utf8');
+    const organiser = new Organiser({ dbPath, rootPath: rootDir, stabilityWindowMs: 0 });
+    await organiser.scan();
+    await reviewScannedTaxonomy(organiser);
+
+    // Break the scanned item once: every later attempt refuses it. Ten
+    // refusals must not leave ten open descriptors behind.
+    rmSync(join(rootDir, 'invoice-09.txt'));
+    writeFileSync(join(rootDir, 'invoice-09.txt'), 'different bytes now\n', 'utf8');
+    const fdCount = (): number => readdirSync('/proc/self/fd').length;
+    const before = fdCount();
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const result = await organiser.classify(undefined, 'rules');
+      expect(result.conflicts?.length ?? 0).toBe(1);
+    }
+    const after = fdCount();
+    expect(after).toBeLessThanOrEqual(before + 2);
+    organiser.close();
+  }, 60_000);
+
+  it('refuses a root replaced underneath the scan (F8)', async () => {
+    const { rootDir, dbPath } = world('root-swap');
+    writeFileSync(join(rootDir, 'invoice-10.txt'), 'invoice for hosting services\n', 'utf8');
+    const organiser = new Organiser({ dbPath, rootPath: rootDir, stabilityWindowMs: 0 });
+    const scanned = await organiser.scan();
+    await reviewScannedTaxonomy(organiser);
+    // The root itself is swapped (different device/inode): reads refuse.
+    renameSync(rootDir, `${rootDir}-old`);
+    mkdirSync(rootDir, { recursive: true });
+    writeFileSync(join(rootDir, 'invoice-10.txt'), 'impostor bytes\n', 'utf8');
+    const result = await organiser.classify(scanned.batchId, 'rules');
+    expect(result.proposals).toBe(0);
+    expect((result.conflicts ?? []).length + result.failed).toBe(1);
+    // Restore the real fixture root for teardown.
+    rmSync(rootDir, { recursive: true, force: true });
+    renameSync(`${rootDir}-old`, rootDir);
     organiser.close();
   }, 60_000);
 

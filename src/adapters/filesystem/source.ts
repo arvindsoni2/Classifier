@@ -11,6 +11,7 @@
 import { createHash } from 'node:crypto';
 import type { BigIntStats, Dirent } from 'node:fs';
 import type { FileHandle } from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
 import { access, constants, lstat, open, readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
@@ -151,13 +152,16 @@ export class FilesystemSource implements SourceAdapter {
       if (st.isSymbolicLink()) {
         return err('OUT_OF_SCOPE', `${path} is a symlink; refusing to follow it out of the root`);
       }
-      const handle = await open(path, 'r');
+      // O_NOFOLLOW and identity verification BEFORE hashing (spec review F8):
+      // a swapped or indirect path is refused without reading its content.
+      const handle = await open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | ((fsConstants as Record<string, number>).O_CLOEXEC ?? 0));
       try {
-        const observed = await snapshot(handle);
-        if (!observed.ok) return observed;
-        if (observed.value.inode !== st.ino.toString() || observed.value.device !== st.dev.toString()) {
+        const opened = await handle.stat({ bigint: true });
+        if (opened.ino.toString() !== st.ino.toString() || opened.dev.toString() !== st.dev.toString()) {
           return err('OUT_OF_SCOPE', `${path} changed between inspection and open; refusing to read a swapped file`);
         }
+        const observed = await snapshot(handle);
+        if (!observed.ok) return observed;
         return observed;
       } finally {
         await handle.close();
@@ -204,27 +208,38 @@ export class FilesystemSource implements SourceAdapter {
           `${externalId} is on another device; refusing to read across a mount boundary`,
         );
       }
-      const handle = await open(path, 'r');
+      // (3) Open with O_NOFOLLOW (spec review F8): the anchored, no-symlink
+      // guarantee lives at the actual open boundary, not only in the earlier
+      // lstat. Ownership transfers to the caller ONLY on success; every
+      // refusal below closes the descriptor.
+      const handle = await open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | ((fsConstants as Record<string, number>).O_CLOEXEC ?? 0));
       try {
-        // (3) The opened descriptor must be the same file the lstat saw.
+        // (4) The opened descriptor must be the file the lstat saw, verified
+        // BEFORE any content is hashed.
         const opened = await handle.stat({ bigint: true });
         if (opened.ino.toString() !== before.ino.toString() || opened.dev.toString() !== before.dev.toString()) {
+          await handle.close();
           return err(
             'OUT_OF_SCOPE',
             `${externalId} changed between inspection and open; refusing to read a swapped file`,
           );
         }
         const observed = await snapshot(handle);
-        if (!observed.ok) return observed;
-        // (4) The snapshot recorded at discovery must still hold.
+        if (!observed.ok) {
+          await handle.close();
+          return observed;
+        }
+        // (5) The snapshot recorded at discovery must still hold.
         if (expected !== null) {
           if (observed.value.sha256 !== expected.sha256) {
+            await handle.close();
             return err(
               'STALE',
               `${externalId} changed since it was scanned; re-scan before classifying`,
             );
           }
           if (observed.value.inode !== expected.inode || observed.value.device !== expected.device) {
+            await handle.close();
             return err(
               'STALE',
               `${externalId} was replaced since it was scanned; re-scan before classifying`,

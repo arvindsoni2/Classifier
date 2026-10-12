@@ -57,7 +57,7 @@ section below — a checked box never covers a missing feature.
 
 ## Phase 3 — Scope and audit (F8, F10)
 
-- [ ] **F8** `openCandidate` closes the descriptor on every unsuccessful
+- [x] **F8** `openCandidate` closes the descriptor on every unsuccessful
   return; reads use O_NOFOLLOW at the actual open boundary with the lstat/
   fstat identity checks; `inspect` verifies identity before hashing.
   Tests: descriptor count stable across repeated refusals; ancestor/path
