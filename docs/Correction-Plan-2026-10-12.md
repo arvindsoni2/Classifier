@@ -62,7 +62,7 @@ section below — a checked box never covers a missing feature.
   fstat identity checks; `inspect` verifies identity before hashing.
   Tests: descriptor count stable across repeated refusals; ancestor/path
   replacement refused.
-- [ ] **F10** Per-run persistence: every route decision (not just the last)
+- [x] **F10** Per-run persistence: every route decision (not just the last)
   and the extracted evidence are stored; export is batch-exact; default
   export redacts basenames/paths (documented in the manifest), full evidence
   states only on explicit opt-in; exported decisions carry answers and schema

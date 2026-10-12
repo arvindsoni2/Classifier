@@ -89,6 +89,149 @@ describe('live batch audit, export and retention (R12)', () => {
     organiser.close();
   });
 
+  it('an empty later batch exports nothing of the earlier one (F10)', async () => {
+    const { rootDir, dbPath } = world('export-exact');
+    const organiser = new Organiser({ dbPath, rootPath: rootDir, stabilityWindowMs: 0 });
+    const first = await organiser.scan();
+    await reviewScannedTaxonomy(organiser);
+    await organiser.classify(first.batchId, 'rules');
+    const second = await organiser.scan();
+    rmSync(join(rootDir, 'invoice-01.txt'));
+    rmSync(join(rootDir, 'notes-02.txt'));
+    const third = await organiser.scan();
+
+    const outDir = mkdtempSync(join(tmpdir(), 'exact-export-'));
+    fixtures.push(outDir);
+    const repositories = organiser.repositoriesForExport();
+    const exported = exportLiveBatch(repositories, third.batchId, outDir);
+    expect(exported.ok).toBe(true);
+    if (!exported.ok) return;
+    // Batch-exact: the third batch scanned NO files (they were removed after
+    // scan two) — it must not resurrect batch one's proposal.
+    expect(exported.value.proposals).toBe(0);
+    expect(exported.value.items).toBe(0);
+    // The second batch still owns its own truth.
+    const secondExport = exportLiveBatch(repositories, second.batchId, mkdtempSync(join(tmpdir(), 'exact-2-')));
+    expect(secondExport.ok && secondExport.value.items).toBeGreaterThan(0);
+    organiser.close();
+  }, 60_000);
+
+  it('the default export redacts private names; --private replays evidence (F10)', async () => {
+    const { rootDir, dbPath } = world('redaction');
+    const organiser = new Organiser({ dbPath, rootPath: rootDir, stabilityWindowMs: 0 });
+    const scanned = await organiser.scan();
+    await reviewScannedTaxonomy(organiser);
+    await organiser.classify(scanned.batchId, 'rules');
+    const repositories = organiser.repositoriesForExport();
+
+    const publicDir = mkdtempSync(join(tmpdir(), 'export-public-'));
+    const privateDir = mkdtempSync(join(tmpdir(), 'export-private-'));
+    fixtures.push(publicDir, privateDir);
+    exportLiveBatch(repositories, scanned.batchId, publicDir);
+    exportLiveBatch(repositories, scanned.batchId, privateDir, { includePrivateEvidence: true });
+
+    const publicBlob = ['items.jsonl', 'proposals.jsonl', 'decisions.jsonl', 'actions.jsonl', 'exclusions.jsonl']
+      .map((name) => readFileSync(join(publicDir, name), 'utf8'))
+      .join('\n');
+    // No raw basenames, folder names, evidence text or exclusion reasons in
+    // the default export.
+    expect(publicBlob).not.toContain('invoice-01.txt');
+    expect(publicBlob).not.toContain('notes-02.txt');
+    expect(publicBlob).not.toContain('Invoices');
+    expect(publicBlob).not.toContain('first invoice for hosting');
+    const manifest = JSON.parse(readFileSync(join(publicDir, 'manifest.json'), 'utf8')) as {
+      redaction: string;
+      privateEvidenceIncluded: boolean;
+    };
+    expect(manifest.redaction).toContain('hashed');
+    expect(manifest.privateEvidenceIncluded).toBe(false);
+
+    // The opt-in carries the exact model-facing states (replayable, raw names).
+    const privateEvidence = readFileSync(join(privateDir, 'private-evidence.jsonl'), 'utf8');
+    expect(privateEvidence).toContain('invoice-01.txt');
+    expect(privateEvidence).toContain('first invoice for hosting');
+    const lines = privateEvidence.split('\n').filter((line) => line.trim() !== '');
+    expect(lines.length).toBeGreaterThan(0);
+    const replayable = JSON.parse(lines[0] ?? '{}') as {
+      stateHash: string;
+      profile: string;
+      state: { basename?: string; compactText?: string } | null;
+    };
+    // Replayable means: profile + state hash + the exact state a provider saw.
+    expect(replayable.profile).toBe('compact_text');
+    expect(replayable.stateHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(typeof replayable.state?.basename).toBe('string');
+    organiser.close();
+  }, 60_000);
+
+  it('exported decisions carry the full probability vectors (F10)', async () => {
+    const { rootDir, dbPath } = world('vectors');
+    const organiser = new Organiser({ dbPath, rootPath: rootDir, stabilityWindowMs: 0 });
+    const scanned = await organiser.scan();
+    await reviewScannedTaxonomy(organiser);
+    await organiser.classify(scanned.batchId, 'rules');
+    const outDir = mkdtempSync(join(tmpdir(), 'vectors-export-'));
+    fixtures.push(outDir);
+    exportLiveBatch(organiser.repositoriesForExport(), scanned.batchId, outDir);
+    const decisions = readFileSync(join(outDir, 'decisions.jsonl'), 'utf8')
+      .split('\n')
+      .filter((line) => line.trim() !== '')
+      .map((line) => JSON.parse(line) as {
+        provider: string;
+        modelRevision: string;
+        evidenceHash: string;
+        schemaHash: string;
+        answers: { selectedId: string; probabilities: Record<string, number> }[];
+      });
+    expect(decisions.length).toBeGreaterThan(0);
+    for (const row of decisions) {
+      expect(row.provider).toBe('rules');
+      expect(row.modelRevision).toBe('rules@1.0.0');
+      expect(row.evidenceHash).toMatch(/^[0-9a-f]{64}$/);
+      expect(row.schemaHash).toMatch(/^[0-9a-f]{64}$/);
+      const answer = row.answers[row.answers.length - 1];
+      expect(answer).toBeDefined();
+      expect(Object.keys(answer?.probabilities ?? {}).length).toBeGreaterThan(1);
+    }
+    organiser.close();
+  }, 60_000);
+
+  it('retention expires payloads but keeps the undo-capable journal (F10)', async () => {
+    const { rootDir, dbPath } = world('retention-journal');
+    const organiser = new Organiser({ dbPath, rootPath: rootDir, stabilityWindowMs: 0 });
+    const scanned = await organiser.scan();
+    await reviewScannedTaxonomy(organiser);
+    await organiser.classify(scanned.batchId, 'rules');
+    const approval = await organiser.approveAll(scanned.batchId);
+    expect(approval.ok).toBe(true);
+    if (!approval.ok) return;
+    await organiser.applyBatch(scanned.batchId, {
+      approvalId: approval.value.approvalId,
+      actionSetHash: approval.value.actionSetHash,
+    });
+    const repositories = organiser.repositoriesForExport();
+
+    // Second scan so the FIRST batch is out of the keep window.
+    writeFileSync(join(rootDir, 'notes-later.txt'), 'later note\n', 'utf8');
+    await organiser.scan();
+
+    const before = repositories.decisions.listByRoot(scanned.rootId);
+    expect(before.length).toBeGreaterThan(0);
+    const retention = retainBatches(repositories, 1);
+    expect(retention.purged).toContain(scanned.batchId);
+
+    // Payloads expired; the journal stayed.
+    expect(repositories.decisions.listByRoot(scanned.rootId).length).toBeLessThan(before.length);
+    expect(repositories.evidence.listByRoot(scanned.rootId).every((row) => row.stateJson === null)).toBe(true);
+    const journal = repositories.actions.listByBatch(scanned.batchId);
+    expect(journal.some((record) => record.state === 'applied')).toBe(true);
+    const receipts = journal.filter((record) => record.receiptJson !== null);
+    expect(receipts.length).toBeGreaterThan(0);
+    // Items and proposals remain: undo can still resolve the approved work.
+    expect(repositories.proposals.listByBatch(scanned.batchId).length).toBeGreaterThan(0);
+    organiser.close();
+  }, 60_000);
+
   it('keeps a batch with unfinished work during retention', () => {
     const { rootDir, dbPath } = world('retention');
     const organiser = new Organiser({ dbPath, rootPath: rootDir, stabilityWindowMs: 0 });

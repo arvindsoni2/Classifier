@@ -53,6 +53,37 @@ export interface WriterLockOwner {
   owner: string;
 }
 
+export interface EvidenceRecord {
+  id: Id;
+  itemId: Id;
+  stateHash: string;
+  profile: string;
+  /** Public audit manifest: hashes and revisions, no private content. */
+  manifestJson: string;
+  /** The model-facing state, stored locally only (replayable, F10). */
+  stateJson: string | null;
+}
+
+interface EvidenceRow {
+  id: string;
+  item_id: string;
+  state_hash: string;
+  profile: string;
+  manifest_json: string;
+  state_json: string | null;
+}
+
+function mapEvidenceRow(row: EvidenceRow): EvidenceRecord {
+  return {
+    id: row.id,
+    itemId: row.item_id,
+    stateHash: row.state_hash,
+    profile: row.profile,
+    manifestJson: row.manifest_json,
+    stateJson: row.state_json,
+  };
+}
+
 export interface DecisionRecord {
   id: Id;
   itemId: Id;
@@ -179,10 +210,16 @@ export interface Repositories {
   };
   /** Removes a retained batch and everything that references it (R12). */
   purgeBatch(batchId: Id): void;
+  evidence: {
+    save(evidence: EvidenceRecord): void;
+    listByRoot(rootId: Id): EvidenceRecord[];
+    deleteByItem(itemId: Id): void;
+  };
   decisions: {
     save(decision: DecisionRecord): void;
     listByRoot(rootId: Id): { decision: DecisionRecord; rootId: Id }[];
     listByItem(itemId: Id): DecisionRecord[];
+    deleteByItem(itemId: Id): void;
   };
   locks: {
     /**
@@ -583,6 +620,20 @@ export function createRepositories(dbPath: string): Repositories {
   const renewLock = db.prepare(
     'UPDATE writer_locks SET acquired_at = ? WHERE root_id = ? AND owner = ?',
   );
+  // Additive (F10): pre-F10 databases gain the replayable state column.
+  const evidenceColumns = db.prepare('PRAGMA table_info(evidence)').all() as { name: string }[];
+  if (evidenceColumns.length > 0 && !evidenceColumns.some((column) => column.name === 'state_json')) {
+    db.exec('ALTER TABLE evidence ADD COLUMN state_json TEXT');
+  }
+  const insertEvidence = db.prepare(
+    `INSERT OR REPLACE INTO evidence (id, item_id, state_hash, profile, manifest_json, state_json)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  );
+  const listEvidenceByRoot = db.prepare(
+    'SELECT e.* FROM evidence e JOIN items i ON i.id = e.item_id WHERE i.root_id = ? ORDER BY e.rowid',
+  );
+  const deleteEvidenceByItem = db.prepare('DELETE FROM evidence WHERE item_id = ?');
+  const deleteDecisionByItem = db.prepare('DELETE FROM decisions WHERE item_id = ?');
   const insertDecision = db.prepare(
     `INSERT OR REPLACE INTO decisions (id, item_id, provider, model_revision, runtime_revision,
        evidence_hash, schema_hash, answers_json, elapsed_ms, token_counts_json, error)
@@ -876,6 +927,24 @@ export function createRepositories(dbPath: string): Repositories {
         updateAction.run(update.state, update.receiptJson ?? null, actionId);
       },
     },
+    evidence: {
+      save(evidence) {
+        insertEvidence.run(
+          evidence.id,
+          evidence.itemId,
+          evidence.stateHash,
+          evidence.profile,
+          evidence.manifestJson,
+          evidence.stateJson,
+        );
+      },
+      listByRoot(rootId) {
+        return (listEvidenceByRoot.all(rootId) as EvidenceRow[]).map(mapEvidenceRow);
+      },
+      deleteByItem(itemId) {
+        deleteEvidenceByItem.run(itemId);
+      },
+    },
     decisions: {
       save(decision) {
         insertDecision.run(
@@ -898,6 +967,9 @@ export function createRepositories(dbPath: string): Repositories {
       },
       listByItem(itemId) {
         return (listDecisionsByItem.all(itemId) as DecisionRow[]).map(mapDecisionRow);
+      },
+      deleteByItem(itemId) {
+        deleteDecisionByItem.run(itemId);
       },
     },
     locks: {
@@ -949,20 +1021,20 @@ export function createRepositories(dbPath: string): Repositories {
     transaction,
     purgeBatch(batchId) {
       transaction(() => {
-        const actionIds = (
-          listActionsByBatch.all(batchId) as { id: string }[]
-        ).map((row) => row.id);
-        for (const actionId of actionIds) {
-          db.prepare('DELETE FROM action_events WHERE action_id = ?').run(actionId);
+        // Distinct retention periods (spec review F10): the classification
+        // PAYLOADS of an out-of-window batch expire, while the action journal,
+        // approvals, proposals and items remain — an applied action must stay
+        // undoable and auditable. Batch bookkeeping goes with the payloads.
+        const itemRows = listItemsByBatch.all(batchId) as ItemRow[];
+        for (const row of itemRows) {
+          deleteEvidenceByItem.run(row.id);
+          deleteDecisionByItem.run(row.id);
         }
-        db.prepare(
-          'DELETE FROM actions WHERE approval_id IN (SELECT id FROM approvals WHERE batch_id = ?)',
-        ).run(batchId);
-        db.prepare('DELETE FROM approvals WHERE batch_id = ?').run(batchId);
-        db.prepare('DELETE FROM batch_items WHERE batch_id = ?').run(batchId);
+        // Membership stays: it is the join that keeps the execution journal
+        // batch-queryable (and its absence would make purged batches lie
+        // about membership). Only the exclusion TEXT goes: the reasons quote
+        // private basenames.
         db.prepare('DELETE FROM batch_exclusions WHERE batch_id = ?').run(batchId);
-
-        db.prepare('DELETE FROM batches WHERE id = ?').run(batchId);
       });
     },    close() {
       db.close();

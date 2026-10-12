@@ -384,9 +384,13 @@ export class Organiser {
           if (process.env.ORGANISER_DEBUG === '1') console.error('decideRoute failed', routed.detail);
           continue;
         }
-        // The provider's own decision is persisted with its real provenance
-        // (spec review R12); the routing wrapper stays derived.
-        const decisionId = routed.value.decision === null ? null : this.persistDecision(item, routed.value.decision);
+        // Evidence and EVERY level's provider decision are persisted with
+        // their real provenance (spec review R12/F10): the routing wrapper
+        // stays derived, the run stays replayable.
+        this.persistEvidence(item, evidenceValue);
+        const decisionIds = routed.value.decisions.map((providerDecision) =>
+          this.persistDecision(item, providerDecision),
+        );
         const decision = routed.value.route;
         if (decision.answers.at(-1)?.selectedId === 'unknown') {
           deferredItems.push(item.externalId);
@@ -405,7 +409,7 @@ export class Organiser {
         }
         this.repositories.proposals.save({
           ...planned.value,
-          decisionIds: decisionId === null ? [] : [decisionId],
+          decisionIds,
         });
         proposals += 1;
       } finally {
@@ -429,7 +433,7 @@ export class Organiser {
     evidenceValue: Evidence,
     manifests: Parameters<typeof buildMatchedRequest>[2],
     profile: 'metadata' | 'compact_text',
-  ): Promise<Result<{ route: Decision; decision: Decision | null }>> {
+  ): Promise<Result<{ route: Decision; decisions: Decision[] }>> {
     let nodeId: Id = 'root';
     const answers: Decision['answers'] = [];
     const providerDecisions: Decision[] = [];
@@ -476,7 +480,30 @@ export class Organiser {
         tokenCounts: {},
         error: null,
       },
-      decision: providerDecisions[providerDecisions.length - 1] ?? null,
+      // Every level's provider decision: a replayable run needs the complete
+      // immutable route, not just the terminal answer (spec review F10).
+      decisions: providerDecisions,
+    });
+  }
+
+  /**
+   * Stores the extracted evidence with its exact model-facing state. The DB
+   * is owner-only and outside the organised root; the state leaves it only
+   * through an explicit private export (spec review F10).
+   */
+  private persistEvidence(item: Item, evidenceValue: Evidence): void {
+    this.repositories.evidence.save({
+      id: evidenceValue.id,
+      itemId: item.id,
+      stateHash: evidenceValue.stateHash,
+      profile: evidenceValue.profile,
+      manifestJson: JSON.stringify({
+        status: evidenceValue.status,
+        truncated: evidenceValue.truncated,
+        extractorRevision: evidenceValue.extractorRevision,
+        inputTokenCounts: evidenceValue.inputTokenCounts,
+      }),
+      stateJson: JSON.stringify(evidenceValue.state),
     });
   }
 

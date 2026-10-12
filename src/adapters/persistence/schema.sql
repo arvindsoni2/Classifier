@@ -34,7 +34,11 @@ CREATE TABLE IF NOT EXISTS evidence (
   state_hash TEXT NOT NULL,
   profile TEXT NOT NULL,
   manifest_json TEXT NOT NULL,
-  private_blob_ref TEXT
+  private_blob_ref TEXT,
+  -- The exact model-facing state, kept ONLY in this owner-only database so a
+  -- treatment can be replayed (spec review F10). Exports withhold it unless
+  -- the caller explicitly opts into private evidence.
+  state_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS taxonomy_revisions (
