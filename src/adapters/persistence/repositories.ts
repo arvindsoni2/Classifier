@@ -188,6 +188,8 @@ export interface Repositories {
      * across every process.
      */
     acquire(rootId: Id, staleAfterMs: number): string | null;
+    /** Heartbeat: extends the lease only while this owner still holds it. */
+    renew(rootId: Id, owner: string): boolean;
     release(rootId: Id, owner: string): void;
   };
   folderCandidates: {
@@ -530,6 +532,9 @@ export function createRepositories(dbPath: string): Repositories {
      WHERE writer_locks.owner = excluded.owner OR writer_locks.acquired_at < ?`,
   );
   const releaseLock = db.prepare('DELETE FROM writer_locks WHERE root_id = ? AND owner = ?');
+  const renewLock = db.prepare(
+    'UPDATE writer_locks SET acquired_at = ? WHERE root_id = ? AND owner = ?',
+  );
   const insertDecision = db.prepare(
     `INSERT OR REPLACE INTO decisions (id, item_id, provider, model_revision, runtime_revision,
        evidence_hash, schema_hash, answers_json, elapsed_ms, token_counts_json, error)
@@ -851,6 +856,10 @@ export function createRepositories(dbPath: string): Repositories {
           return result.changes === 1 ? owner : null;
         });
       },
+      renew(rootId, owner) {
+        const result = renewLock.run(new Date().toISOString(), rootId, owner);
+        return result.changes === 1;
+      },
       release(rootId, owner) {
         releaseLock.run(rootId, owner);
       },
@@ -896,7 +905,7 @@ export function createRepositories(dbPath: string): Repositories {
         db.prepare('DELETE FROM approvals WHERE batch_id = ?').run(batchId);
         db.prepare('DELETE FROM batch_items WHERE batch_id = ?').run(batchId);
         db.prepare('DELETE FROM batch_exclusions WHERE batch_id = ?').run(batchId);
-        db.prepare('DELETE FROM writer_locks WHERE root_id = (SELECT root_id FROM batches WHERE id = ?)').run(batchId);
+
         db.prepare('DELETE FROM batches WHERE id = ?').run(batchId);
       });
     },    close() {

@@ -8,18 +8,18 @@ section below — a checked box never covers a missing feature.
 
 ## Phase 1 — Safety (F1, F4, F5, F6)
 
-- [ ] **F1** Probe fixture is uniquely and exclusively created
+- [x] **F1** Probe fixture is uniquely and exclusively created
   (`.fsops-probe-<pid>-<nanos>`, EEXIST never adopted); cleanup unlinks only
   files whose inode was captured at creation; rmdir only the exact created
   directory. Tests: pre-existing `.fsops-probe/probe-src/dst` user files
   survive; two probes coexist; nothing is deleted that this attempt did not
   create.
-- [ ] **F4** Per-effect revalidation: approval validity (versions, durable
+- [x] **F4** Per-effect revalidation: approval validity (versions, durable
   revisions, expiry) is re-checked immediately before every helper call; the
   first invalidation stops the loop and every remaining action reports stale
   with zero helper calls. Tests: taxonomy bump and mid-loop rejection after
   action one.
-- [ ] **F5** (a) forward helper errors use the same definite/uncertain split
+- [x] **F5** (a) forward helper errors use the same definite/uncertain split
   as undo (uncertain stays non-terminal for reconciliation); (b) `undoAction`
   returns the reconciliation outcome for an existing intent instead of
   falling through to a second attempt; (c) cancellation reconciliation swaps
@@ -28,7 +28,7 @@ section below — a checked box never covers a missing feature.
   definite absence from unobservable inspect failures; (e) undo/cancel
   recovery reads the action's immutable fields, receipts rebuild `before`
   from journalled data.
-- [ ] **F6** Undo acquires the same root writer lock; the lock is a lease
+- [x] **F6** Undo acquires the same root writer lock; the lock is a lease
   with per-action heartbeat/renewal — elapsed time alone never steals a live
   writer's lock; a writer that loses ownership halts further effects; busy
   writers return an explicit stale/locked result (not an empty list);

@@ -118,9 +118,13 @@ describe('journal and writer isolation (R6)', () => {
     };
 
     const first = world.service.applyBatch(world.batch.id, approval.approvalId, approval.actionSetHash);
-    // The second writer must be told the root is locked, not run concurrently.
+    // The second writer must be told the root is locked EXPLICITLY: one
+    // refusal per selected action naming the lock, not a vacuous empty list
+    // (spec review F6).
     const secondResult = await second.applyBatch(world.batch.id, approval.approvalId, approval.actionSetHash);
+    expect(secondResult.results).toHaveLength(world.proposals.length);
     expect(secondResult.results.every((entry) => entry.outcome === 'stale')).toBe(true);
+    expect(secondResult.results.every((entry) => /locked by another writer/.test(entry.detail))).toBe(true);
 
     releaseMove();
     await first;

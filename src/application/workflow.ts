@@ -83,6 +83,8 @@ export interface WorkflowDeps {
   currentTaxonomyRevision?: () => Revision;
   /** Durable current policy revision from the root record. */
   currentPolicyRevision?: () => Revision;
+  /** Cross-process root lease window (default 60s; tests shrink it). */
+  lockLeaseMs?: number;
 }
 
 export type ActionOutcome =
@@ -107,7 +109,7 @@ export interface BatchResult {
 
 const TERMINAL_STATES = new Set(['applied', 'conflict', 'stale', 'canceled', 'undone']);
 
-/** A lock older than this belongs to a crashed writer and may be taken over. */
+/** Default lease window; live writers heartbeat well inside it. */
 const WRITER_LOCK_STALE_MS = 60_000;
 
 /**
@@ -178,6 +180,8 @@ export class ApplicationService {
   private readonly currentTaxonomyRevisionFn?: () => Revision;
   /** Durable current policy revision, supplied by the application (R1). */
   private readonly currentPolicyRevisionFn?: () => Revision;
+  /** Cross-process root lease window in milliseconds. */
+  private readonly lockLeaseMs: number = WRITER_LOCK_STALE_MS;
   /** The writer lock: one apply/recovery operation at a time (LLD §4). */
   private writerLock: Promise<unknown> = Promise.resolve();
 
@@ -194,6 +198,7 @@ export class ApplicationService {
     if (deps.currentPolicyRevision !== undefined) {
       this.currentPolicyRevisionFn = deps.currentPolicyRevision;
     }
+    this.lockLeaseMs = deps.lockLeaseMs ?? WRITER_LOCK_STALE_MS;
   }
 
   /** Creates and journals an approval binding the current versions. */
@@ -273,6 +278,35 @@ export class ApplicationService {
     return next;
   }
 
+  /**
+   * Cross-process root lease (spec review F6): one writer per root across
+   * every service instance. The holder heartbeats well inside the window,
+   * so elapsed time never steals a LIVE writer's lease; expiry only detects
+   * holders that stopped heartbeating (process death). The `fence` passed to
+   * `run` must be checked before every effect: once ownership is lost the
+   * writer halts instead of racing a new owner.
+   */
+  private async withRootLease<T>(
+    rootId: Id,
+    run: (fence: () => boolean) => Promise<T>,
+    onBusy: () => T,
+  ): Promise<T> {
+    if (rootId === '') return await run(() => true);
+    const owner = this.repositories.locks.acquire(rootId, this.lockLeaseMs);
+    if (owner === null) return onBusy();
+    let lost = false;
+    const renewMs = Math.max(50, Math.floor(this.lockLeaseMs / 3));
+    const timer = setInterval(() => {
+      if (!this.repositories.locks.renew(rootId, owner)) lost = true;
+    }, renewMs);
+    try {
+      return await run(() => !lost && this.repositories.locks.renew(rootId, owner));
+    } finally {
+      clearInterval(timer);
+      this.repositories.locks.release(rootId, owner);
+    }
+  }
+
   /** Current bound state an approval is validated against. */
   private currentContext(approvalActions: { proposalId: Id; version: Revision }[]): {
     taxonomyRevision: Revision;
@@ -327,25 +361,38 @@ export class ApplicationService {
    */
   applyBatch(batchId: Id, approvalId: Id, actionSetHash: Sha256): Promise<BatchResult> {
     return this.withWriterLock(async () => {
-      // Root-scoped lock (spec review R6): one writer per root across every
-      // process, so a concurrent apply/resume/undo cannot interleave.
-      const rootId = this.repositories.batches.get(batchId)?.rootId ?? '';
-      const claim = rootId === '' ? null : this.repositories.locks.acquire(rootId, WRITER_LOCK_STALE_MS);
-      if (rootId !== '' && claim === null) {
-        return { batchId, results: [] };
-      }
-      try {
-        return await this.applyBatchLocked(batchId, approvalId, actionSetHash);
-      } finally {
-        if (rootId !== '' && claim !== null) {
-          this.repositories.locks.release(rootId, claim);
-        }
-      }
+      const batch = this.repositories.batches.get(batchId);
+      if (batch === null) return { batchId, results: [] };
+      // A busy root answers with an EXPLICIT refusal per selected action
+      // (spec review F6), never an empty result that vacuously "passes".
+      const selected = (() => {
+        const approval = this.repositories.approvals.get(approvalId);
+        if (approval === null) return [] as { proposalId: Id }[];
+        return JSON.parse(approval.selectedActionsJson) as { proposalId: Id }[];
+      })();
+      return this.withRootLease(
+        batch.rootId,
+        (fence) => this.applyBatchLocked(batchId, approvalId, actionSetHash, fence),
+        () => ({
+          batchId,
+          results: selected.map((action) => ({
+            actionId: action.proposalId,
+            proposalId: action.proposalId,
+            outcome: 'stale' as ActionOutcome,
+            detail: 'the root is locked by another writer; nothing executed',
+          })),
+        }),
+      );
     });
   }
 
-  /** The apply body, run while holding this root's writer lock. */
-  private async applyBatchLocked(batchId: Id, approvalId: Id, actionSetHash: Sha256): Promise<BatchResult> {
+  /** The apply body, run while holding this root's writer lease. */
+  private async applyBatchLocked(
+    batchId: Id,
+    approvalId: Id,
+    actionSetHash: Sha256,
+    fence: () => boolean,
+  ): Promise<BatchResult> {
       const batch = this.repositories.batches.get(batchId);
       if (batch === null) {
         return { batchId, results: [] };
@@ -420,6 +467,20 @@ export class ApplicationService {
             detail: 'cancellation was requested before this action',
           });
           continue;
+        }
+        // The lease fence halts effects the moment another owner took the
+        // root (spec review F6): continuing would race the new writer.
+        if (!fence()) {
+          const remainingActions = selected.slice(results.length);
+          for (const refused of remainingActions) {
+            results.push({
+              actionId: refused.proposalId,
+              proposalId: refused.proposalId,
+              outcome: 'stale' as ActionOutcome,
+              detail: 'the root writer lease was lost; nothing further executed',
+            });
+          }
+          break;
         }
         // Per-effect revalidation (spec review F4): the approval was checked
         // once at batch entry, but an ordinary edit, rejection, taxonomy
@@ -1143,25 +1204,44 @@ export class ApplicationService {
     return this.withWriterLock(async () => {
       const batch = this.repositories.batches.get(batchId);
       if (batch === null) return { batchId, results: [] };
-      // Root-scoped lock (spec review R6): resume serialises with apply/undo
-      // across processes, so an interrupted action is never reconciled twice.
-      const claim = this.repositories.locks.acquire(batch.rootId, WRITER_LOCK_STALE_MS);
-      if (claim === null) return { batchId, results: [] };
-      try {
-        return await this.resumeBatchLocked(batchId, batch);
-      } finally {
-        this.repositories.locks.release(batch.rootId, claim);
-      }
+      // Root-scoped lease (spec review R6/F6): resume serialises with
+      // apply/undo across processes, and a busy root answers explicitly.
+      return this.withRootLease(
+        batch.rootId,
+        (fence) => this.resumeBatchLocked(batchId, batch, fence),
+        () => ({
+          batchId,
+          results: [{
+            actionId: batchId,
+            proposalId: batchId,
+            outcome: 'stale' as ActionOutcome,
+            detail: 'the root is locked by another writer; resume not attempted',
+          }],
+        }),
+      );
     });
   }
 
-  private async resumeBatchLocked(batchId: Id, batch: { id: Id; rootId: Id; cancellationRequested: boolean }): Promise<BatchResult> {
+  private async resumeBatchLocked(
+    batchId: Id,
+    batch: { id: Id; rootId: Id; cancellationRequested: boolean },
+    fence: () => boolean,
+  ): Promise<BatchResult> {
       const approvals = this.repositories.approvals.listByBatch(batchId);
       const results: ActionResult[] = [];
       const seen = new Set<string>();
       for (const approval of approvals) {
         for (const record of this.repositories.actions.listByApproval(approval.id)) {
           if (seen.has(record.id) || TERMINAL_STATES.has(record.state)) continue;
+          if (!fence()) {
+            results.push({
+              actionId: record.id,
+              proposalId: record.proposalId,
+              outcome: 'stale' as ActionOutcome,
+              detail: 'the root writer lease was lost; reconciliation halted',
+            });
+            continue;
+          }
           seen.add(record.id);
           if (batch.cancellationRequested === true) {
             // Cancellation never erases an effect: the record is resolved
@@ -1198,6 +1278,27 @@ export class ApplicationService {
    */
   undoAction(actionId: Id, undoApprovalId: Id): Promise<Result<MoveReceipt>> {
     return this.withWriterLock(async () => {
+      // The undo takes the SAME root lease as apply/resume (spec review F6):
+      // holding only the in-process queue let a second process interleave.
+      const leaseApproval = this.repositories.approvals.get(undoApprovalId);
+      const leaseBatch = leaseApproval === null ? null : this.repositories.batches.get(leaseApproval.batchId);
+      if (leaseBatch !== null) {
+        return this.withRootLease(
+          leaseBatch.rootId,
+          (fence) => this.undoActionInner(actionId, undoApprovalId, fence),
+          () => err('STALE', 'the root is locked by another writer; the undo was not attempted'),
+        );
+      }
+      return this.undoActionInner(actionId, undoApprovalId, () => true);
+    });
+  }
+
+  private async undoActionInner(
+    actionId: Id,
+    undoApprovalId: Id,
+    fence: () => boolean,
+  ): Promise<Result<MoveReceipt>> {
+    {
       const action = this.repositories.actions.get(actionId);
       if (action === null) return err('OUT_OF_SCOPE', `unknown action ${actionId}`);
       if (action.state !== 'applied' || action.receiptJson === null) {
@@ -1302,6 +1403,9 @@ export class ApplicationService {
       });
 
       this.faultHook?.('after-undo-intent', { actionId: undoActionId, proposalId: action.proposalId });
+      if (!fence()) {
+        return err('STALE', 'the root writer lease was lost; the undo effect was not attempted');
+      }
       const result = await this.helper.undoAt(
         {
           actionId: undoActionId,
@@ -1356,7 +1460,7 @@ export class ApplicationService {
         });
       });
       return ok(result.value);
-    });
+    }
   }
 
   /**
