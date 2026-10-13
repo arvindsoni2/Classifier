@@ -85,9 +85,18 @@ function detectFormat(basename: string): DetectedFormat {
   if (lower.endsWith('.md') || lower.endsWith('.markdown')) return 'markdown';
   if (lower.endsWith('.pdf')) return 'pdf';
   if (lower.endsWith('.docx')) return 'docx';
+  // Key and certificate material is NOT text evidence: extracting it would
+  // put secrets into a provider request. Refused before any format match.
+  if (/\.(pem|key|p12|pfx|jks|keystore|crt|cer|der|asc|gpg)$/.test(lower)) return 'other';
   if (/\.(png|jpg|jpeg|gif|webp|bmp|svg|heic|tiff?)$/.test(lower)) return 'image';
   if (/\.(zip|tar|gz|tgz|bz2|xz|7z|rar|zst)$/.test(lower)) return 'archive';
   if (/\.(rpm|deb|exe|msi|appimage|dmg|iso|bin|sh)$/.test(lower)) return 'installer';
+  // Source and configuration files are plain text and are read with the same
+  // bounded UTF-8 rules as .txt. Without this they fell through to 'other' and
+  // a classifier received only a basename for exactly the files a person most
+  // wants filed (pilot finding: package.json, rust-pareto.jsx, .html).
+  if (/\.(json|jsonc|jsonl|ndjson|jsx|tsx|js|mjs|cjs|ts|html?|xml|csv|tsv|ya?ml|toml|ini|cfg|conf|log|rst|sql|scala|java|kt|kts|go|rs|rb|php|c|h|cc|cpp|hpp|cs|swift|vue|svelte)$/.test(lower))
+    return 'text';
   return 'other';
 }
 

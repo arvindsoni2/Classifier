@@ -277,6 +277,41 @@ describe('extractEvidence — explicit statuses for hostile and unsupported inpu
     expect(String(result.state.extractionNote)).toMatch(/utf-8|utf8/i);
   });
 
+  it('extracts plain-text source and config files as readable evidence', async () => {
+    // Pilot finding: package.json, rust-pareto.jsx and .html carried NO
+    // compactText (fell through to 'other' => metadata only), so a model
+    // classifier had nothing but a filename for exactly the files a person
+    // most wants filed. These formats are text, bounded like every other read.
+    const fx = fixture('text-source');
+    const sources: Record<string, string> = {
+      'package.json': '{"name":"rust-pareto","dependencies":{"react":"19"}}',
+      'rust-pareto.jsx': 'export function Pareto({points}) { return <svg>{points}</svg>; }',
+      'index.html': '<html><head><title>Invoice receipt</title></head></html>',
+      'data.csv': 'date,amount\n2026-09-01,250.00',
+      'config.yaml': 'provider: clef\nendpoint: http://127.0.0.1:11435',
+    };
+    for (const [name, body] of Object.entries(sources)) {
+      putFile(fx.root, name, body);
+      const evidence = unwrap(await extract(fx, name));
+      expect(evidence.status, name).toBe('ready');
+      expect(typeof evidence.state.compactText, name).toBe('string');
+      expect(String(evidence.state.compactText).length, name).toBeGreaterThan(0);
+    }
+  });
+
+  it('never extracts key or certificate material', async () => {
+    // A .pem in a real Downloads folder is VPN/key material. It is not text
+    // evidence: reading it would put secrets into a provider request.
+    const fx = fixture('key-material');
+    putFile(fx.root, 'demo_vpn.pem', '-----BEGIN RSA PRIVATE KEY-----\nMIIabc\n-----END RSA PRIVATE KEY-----\n');
+    putFile(fx.root, 'server.key', '-----BEGIN PRIVATE KEY-----\nMIIxyz\n-----END PRIVATE KEY-----\n');
+    for (const name of ['demo_vpn.pem', 'server.key']) {
+      const evidence = unwrap(await extract(fx, name));
+      expect(evidence.status, name).toBe('metadata_only');
+      expect(evidence.state.compactText, name).toBeUndefined();
+    }
+  });
+
   it('reports unsupported formats as metadata-only with detected format recorded', async () => {
     const fx = fixture('formats');
     putBinaryFile(fx.root, 'photo.png', Buffer.from([0x89, 0x50, 0x4e, 0x47]));
