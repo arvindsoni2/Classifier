@@ -8,6 +8,9 @@ const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
 const assets = [
   ['src/adapters/persistence/schema.sql', 'dist/adapters/persistence/schema.sql'],
+  // The catalogue store reads its schema next to the compiled module, so this
+  // file has to travel into dist or `pnpm catalogue` cannot open a database.
+  ['src/catalogue/schema.sql', 'dist/catalogue/schema.sql'],
   ['src/cli/doctor.js', 'dist/cli/doctor.js'],
 ];
 

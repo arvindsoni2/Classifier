@@ -195,28 +195,42 @@ interface GroupHeadRow {
 /**
  * Groups of ≥ 2 present items with equal `sha256`, hard links collapsed to one
  * copy, sorted by wasted bytes descending. Empty array when nothing collides.
+ *
+ * `scanId` restricts the answer to the items that scan catalogued, which is
+ * what a report about one scan needs: a group is only meaningful if its members
+ * were all seen in the same run.
  */
-export function duplicateGroups(store: CatalogueStore): DuplicateGroup[] {
-  const heads = store.db
-    .prepare(
-      `SELECT sha256, size, COUNT(DISTINCT dev || ':' || ino) AS copies
-       FROM items
-       WHERE status = 'present' AND sha256 IS NOT NULL
-       GROUP BY sha256, size
-       HAVING copies >= 2
-       ORDER BY (copies - 1) * size DESC, sha256 ASC`,
-    )
-    .all() as GroupHeadRow[];
-  if (heads.length === 0) return [];
-
-  const members = store.db.prepare(
+export function duplicateGroups(store: CatalogueStore, scanId?: number): DuplicateGroup[] {
+  // Two prepared variants rather than one with an optional clause: a statement
+  // must not be handed a named parameter its SQL never mentions, and the
+  // members query already carries a positional one.
+  const scoped = scanId === undefined ? '' : ' AND i.last_seen_scan = @scanId';
+  const headsSql = (clause: string): string =>
+    `SELECT sha256, size, COUNT(DISTINCT dev || ':' || ino) AS copies
+     FROM items i
+     WHERE status = 'present' AND sha256 IS NOT NULL${clause}
+     GROUP BY sha256, size
+     HAVING copies >= 2
+     ORDER BY (copies - 1) * size DESC, sha256 ASC`;
+  const membersSql = (clause: string): string =>
     `SELECT i.rel_path AS relPath, i.size AS size, i.dev AS dev, i.ino AS ino, r.path AS rootPath
      FROM items i JOIN roots r ON r.id = i.root_id
-     WHERE i.status = 'present' AND i.sha256 = ?
-     ORDER BY r.path ASC, i.rel_path ASC`,
-  );
+     WHERE i.status = 'present' AND i.sha256 = ?${clause}
+     ORDER BY r.path ASC, i.rel_path ASC`;
+
+  const heads = (
+    scanId === undefined
+      ? store.db.prepare(headsSql('')).all()
+      : store.db.prepare(headsSql(scoped)).all({ scanId })
+  ) as GroupHeadRow[];
+  if (heads.length === 0) return [];
+
+  const members =
+    scanId === undefined ? store.db.prepare(membersSql('')) : store.db.prepare(membersSql(scoped));
   return heads.map((head) => {
-    const items = members.all(head.sha256) as DuplicateItem[];
+    const items = (
+      scanId === undefined ? members.all(head.sha256) : members.all(head.sha256, { scanId })
+    ) as DuplicateItem[];
     return {
       sha256: head.sha256,
       size: head.size,
