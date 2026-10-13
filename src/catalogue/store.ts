@@ -76,6 +76,12 @@ export interface CatalogueStore {
   /** Rows are never deleted: present items this scan did not see become missing. */
   markMissingNotSeen(rootId: number, scanId: number): number;
   addErrors(rows: { scanId: number; rootId: number; relPath: string; code: string; message: string }[]): void;
+  /** Persists a candidate's partial hash; the full hash stays untouched. */
+  setItemPartialHash(rootId: number, relPath: string, partialHash: string): void;
+  /** Persists a candidate's full hash; the partial hash stays untouched. */
+  setItemFullHash(rootId: number, relPath: string, sha256: string): void;
+  /** Records how many distinct files this scan's hashing pass read. */
+  setFilesHashed(scanId: number, filesHashed: number): void;
   close(): void;
 }
 
@@ -112,7 +118,9 @@ export function openStore(dataDir: string): CatalogueStore {
   applySchema(db);
 
   const selectItem = db.prepare(
-    'SELECT id, dev, ino, size, mtime_ns FROM items WHERE root_id = ? AND rel_path = ?',
+    // Aliased to camelCase so the caller compares the fields it names; a
+    // mismatch here silently re-classifies every rescan as changed.
+    'SELECT id, dev, ino, size, mtime_ns AS mtimeNs FROM items WHERE root_id = ? AND rel_path = ?',
   );
   const insertDir = db.prepare(
     `INSERT INTO dirs (root_id, rel_path, dev, ino, file_count, dir_count, last_seen_scan)
@@ -224,6 +232,22 @@ export function openStore(dataDir: string): CatalogueStore {
         for (const row of batch) insertError.run(row);
       });
       write(rows);
+    },
+
+    setItemPartialHash(rootId, relPath, partialHash) {
+      db.prepare('UPDATE items SET partial_hash = ? WHERE root_id = ? AND rel_path = ?').run(
+        partialHash,
+        rootId,
+        relPath,
+      );
+    },
+
+    setItemFullHash(rootId, relPath, sha256) {
+      db.prepare('UPDATE items SET sha256 = ? WHERE root_id = ? AND rel_path = ?').run(sha256, rootId, relPath);
+    },
+
+    setFilesHashed(scanId, filesHashed) {
+      db.prepare('UPDATE scans SET files_hashed = ? WHERE id = ?').run(filesHashed, scanId);
     },
 
     close() {

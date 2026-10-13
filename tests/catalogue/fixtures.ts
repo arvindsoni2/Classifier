@@ -68,3 +68,43 @@ export function makeTree(label: string, entries: string[]): Fixture {
   }
   return fixture;
 }
+
+export interface MultiRootFixture {
+  /** Absolute paths of the scanned roots, in configuration order. */
+  roots: string[];
+  /** Data directory outside every root, as the config requires. */
+  dataDir: string;
+  /** Writes a file into root `index` at `relPath`. */
+  put(rootIndex: number, relPath: string, contents: string | Buffer): string;
+  cleanup(): void;
+}
+
+/**
+ * A fixture with several sibling roots under one temp parent, for tests that
+ * need duplicates across roots. The data directory sits beside the roots,
+ * never inside one.
+ */
+export function makeRoots(label: string, count: number): MultiRootFixture {
+  const parent = mkdtempSync(join(tmpdir(), `catalogue-${label}-`));
+  const roots: string[] = [];
+  for (let index = 0; index < count; index += 1) {
+    const root = join(parent, `root${index}`);
+    mkdirSync(root, { recursive: true });
+    roots.push(root);
+  }
+  return {
+    roots,
+    dataDir: join(parent, 'data'),
+    put(rootIndex, relPath, contents) {
+      const root = roots[rootIndex];
+      if (root === undefined) throw new Error(`fixture has no root ${rootIndex}`);
+      const target = join(root, relPath);
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, contents);
+      return target;
+    },
+    cleanup() {
+      rmSync(parent, { recursive: true, force: true });
+    },
+  };
+}
