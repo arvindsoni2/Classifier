@@ -1,0 +1,5 @@
+{
+  "roots": ["/home/asoni/Downloads", "/home/asoni/Documents"],
+  "exclude": ["node_modules", "__pycache__", ".venv", "venv", ".tox", ".cache", ".Trash-*"],
+  "dataDir": "~/.local/share/classifier"
+}
