@@ -55,6 +55,28 @@ stayed blocked on any root wider than the 7-children cap (commit 69d0732);
 the review being refused (commit 76377f6). After both fixes the pilot classifies
 72 real candidates: 40 proposals, 30 deferred, 0 failed, 2 conflicts (files that
 left Downloads between scan and classify).
+
+**Clef pilot (2026-10-12/13).** Switching the provider to Clef and replacing
+the 7 folder-shaped categories with a semantic tree (4 groups -> 19 categories
+-> 19 existing folders, depth 3) exposed four further defects, all fixed with
+regression tests:
+
+1. `llama-server` rejects SystemOne decision prompts above its physical batch
+   size (default `-ub 512`) with HTTP 500, and decision prompts cannot be
+   split. 32 of 68 items failed until the server was run with `-b/-ub 4096`.
+   `--ctx-size` alone does not help.
+2. `classify()` set `manifests = manifest.ok ? [manifest] : []`, so a failed
+   health probe silently disabled every token-budget check.
+3. `ClefProvider.health()` inherited the 120s per-item decision deadline, and
+   `doctor` probed providers serially — a status report that could block for
+   minutes.
+4. Source and config files (`.json`, `.jsx`, `.html`, `.csv`, `.yml`) were
+   metadata-only, so a classifier saw a basename and nothing else for exactly
+   the code files a person most wants filed.
+
+The `doctor` CLI test was also not hermetic: it read the gitignored local
+provider config, so it depended on whatever model server the developer had
+running.
 - [x] **F3** PUT /api/taxonomy returns the same shape as GET; the UI reloads
   the authoritative taxonomy after a save. The curation UI gains category and
   group creation with parent selection, and label/description editing.

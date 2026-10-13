@@ -66,6 +66,13 @@ categories and maps them to real discovered folders.
 - `ORGANISER_ROOT` must be set explicitly — there is no implicit fallback to
   your real `~/Downloads` during automated runs or tests.
 - Provider configuration is local (`config/local/providers.json`, gitignored).
+  `ORGANISER_PROVIDER_CONFIG` overrides the path so `doctor` and tests can
+  probe a known endpoint instead of whatever is running locally.
+- Running the Clef SystemOne server requires `-b 4096 -ub 4096`. Decision
+  prompts cannot be split across micro-batches, so llama-server rejects any
+  prompt larger than the physical batch size (default `-ub 512`) with HTTP
+  500 — which silently caps usable evidence at ~512 tokens. `--ctx-size`
+  alone does not help. Verified command in `docs/runtime-manifest.json`.
 
 ## Development
 
