@@ -48,7 +48,7 @@
       ],
       "items": 8,
       "families": 6,
-      "splits": "family-aware, seed 20261006 (development/test populated; calibration empty at this fixture size \u2014 actual support published)",
+      "splits": "family-aware, seed 20261006 (development/test populated; calibration empty at this fixture size — actual support published)",
       "rulesResults": {
         "completed": 3,
         "deferred": 5,
@@ -72,8 +72,8 @@
         }
       },
       "notes": [
-        "Synthetic fixture metrics only: NOT laptop measurements, NOT user data, NOT model benchmark results (docs/05 \u00a78).",
-        "macroF1 was 0.2222 in the first commit of this report; the Milestone A final review caught a predictedSupport double-count (C1) and it is corrected to 0.3333 \u2014 see git history and the final-review ledger lines.",
+        "Synthetic fixture metrics only: NOT laptop measurements, NOT user data, NOT model benchmark results (docs/05 §8).",
+        "macroF1 was 0.2222 in the first commit of this report; the Milestone A final review caught a predictedSupport double-count (C1) and it is corrected to 0.3333 — see git history and the final-review ledger lines.",
         "The rules baseline deferring on metadata-only images/installers with precision 0.2 is the expected behaviour of a keyword baseline under explicit unknown-output policy; it demonstrates deferral accounting, not model quality.",
         "Clef and real Laya evaluations are blocked in this environment (see providers above); the deterministic synthetic report is the Milestone A evaluation evidence."
       ]
@@ -133,11 +133,17 @@
           22215
         ],
         "note": "CPU inference on 8 threads (Quadro P520 4 GB VRAM is too small for a 9B). Serial throughput ~2.6 items/min: a 200-item matched treatment is ~75 min per provider. Real laptop measurement, not a benchmark import."
-      }
+      },
+      "runCommand": "./build/bin/llama-server --host 127.0.0.1 --port 11435 -m <Classifier>/models/Clef-Flash-Q4_K_M.gguf --ctx-size 4096 -b 4096 -ub 4096 --threads 8 --log-disable",
+      "requiredFlags": {
+        "-b 4096": "logical batch size must cover a whole decision prompt",
+        "-ub 4096": "REQUIRED for /v1/systemone. Decision requests cannot be split across micro-batches (server-context.cpp: can_split() is false for the decision task), so llama-server rejects any prompt above the physical batch size with HTTP 500 \"input (N tokens) is too large to process. increase the physical batch size\". The default -ub 512 silently caps usable evidence at ~512 tokens: a real pilot run failed 32 of 68 items with 500s until -ub was raised. --ctx-size alone does NOT help."
+      },
+      "pilotNote": "Batch size is a correctness parameter, not a performance one. Verified on 2026-10-12: with -ub 512 a 1984-token SystemOne prompt returns HTTP 500; with -ub 4096 it returns HTTP 200."
     },
     "jev": {
       "status": "blocked",
-      "detail": "Requires explicit dataset cloud consent; no consent recorded (PRD \u00a78, LLD \u00a73). decide/health return UNAUTHORISED; endpoint is never guessed."
+      "detail": "Requires explicit dataset cloud consent; no consent recorded (PRD §8, LLD §3). decide/health return UNAUTHORISED; endpoint is never guessed."
     }
   },
   "notes": [

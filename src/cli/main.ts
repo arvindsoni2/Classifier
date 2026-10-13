@@ -67,7 +67,12 @@ export async function runCli(argv: readonly string[], options: CliOptions): Prom
   }
 
   if (typed === 'doctor') {
-    print({ providers: await probeProviders(loadProviderConfig()) });
+    // Resolve configuration from the CLI context (cwd + env), never from
+    // ambient process state: every other verb already does this, and a probe
+    // must be reproducible from the command line alone.
+    const configPath =
+      options.env.ORGANISER_PROVIDER_CONFIG ?? join(options.cwd, 'config', 'local', 'providers.json');
+    print({ providers: await probeProviders(loadProviderConfig(configPath, options.env)) });
     return 0;
   }
 

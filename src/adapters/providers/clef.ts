@@ -46,6 +46,13 @@ export interface ClefDeps {
   transport?: ClefTransport;
   /** Per-item deadline; 120 seconds by default (PRD §6). */
   deadlineMs?: number;
+  /**
+   * Liveness-probe budget, independent of the per-item decision deadline.
+   * `doctor` must report on every provider quickly; a probe that inherits the
+   * 120s decision budget blocks the whole command (and, when a real CPU-served
+   * model is reachable, for far longer than a status report should take).
+   */
+  healthTimeoutMs?: number;
 }
 
 class DeadlineError extends Error {
@@ -213,11 +220,15 @@ export class ClefProvider implements DecisionProvider {
   private readonly endpoint: string;
   private readonly transport: ClefTransport;
   private readonly deadlineMs: number;
+  private readonly healthTimeoutMs: number;
 
   constructor(config: ClefConfig, deps: ClefDeps = {}) {
     this.endpoint = config.endpoint.replace(/\/+$/, '');
     this.transport = deps.transport ?? fetchTransport();
     this.deadlineMs = deps.deadlineMs ?? 120_000;
+    // Never longer than a decision: a probe budget beyond the work budget
+    // would let a liveness check wait longer than the thing it checks.
+    this.healthTimeoutMs = Math.min(deps.healthTimeoutMs ?? 30_000, this.deadlineMs);
   }
 
   private withDeadline<T>(promise: Promise<T>, ms: number): Promise<T> {
@@ -270,8 +281,8 @@ export class ClefProvider implements DecisionProvider {
     );
     try {
       const response = await this.withDeadline(
-        this.transport.post(this.url(), body, { timeoutMs: this.deadlineMs }),
-        this.deadlineMs,
+        this.transport.post(this.url(), body, { timeoutMs: this.healthTimeoutMs }),
+        this.healthTimeoutMs,
       );
       if (response.status !== 200) {
         return err(
@@ -299,7 +310,10 @@ export class ClefProvider implements DecisionProvider {
         endpoint: this.url(),
       });
     } catch (error) {
-      return err('PROVIDER_FAILED', `clef health probe failed: ${(error as Error).message}`);
+      return err(
+        'PROVIDER_FAILED',
+        `clef health probe failed within its ${this.healthTimeoutMs}ms probe budget: ${(error as Error).message}`,
+      );
     }
   }
 

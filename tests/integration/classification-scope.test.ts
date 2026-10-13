@@ -130,4 +130,26 @@ describe('classification scope (R3)', () => {
     expect(result.deferredItems).toContain('invoice-03.txt');
     organiser.close();
   }, 60_000);
+
+  it('refuses to classify when the chosen provider cannot report its budget', async () => {
+    // A failed health probe used to yield `manifests = []`, which silently
+    // disabled every token-budget check: oversize requests then went to the
+    // endpoint unchecked (the pilot's 32 HTTP-500 items). Refuse instead of
+    // classifying without a known budget.
+    const { rootDir, dbPath } = world('provider-budget');
+    // Loopback with nothing listening: the probe fails immediately and
+    // hermetically, without any external service.
+    const organiser = new Organiser({
+      dbPath,
+      rootPath: rootDir,
+      stabilityWindowMs: 0,
+      providerConfig: { clef: { endpoint: 'http://127.0.0.1:1' } },
+    });
+    await organiser.scan();
+    await reviewScannedTaxonomy(organiser);
+    await expect(organiser.classify(undefined, 'clef')).rejects.toThrow(
+      /PROVIDER_UNAVAILABLE|budget|health/i,
+    );
+    organiser.close();
+  }, 60_000);
 });

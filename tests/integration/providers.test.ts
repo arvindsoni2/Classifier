@@ -283,6 +283,24 @@ describe('ClefProvider (typed SystemOne endpoint)', () => {
     await provider.close();
   }, 10_000);
 
+  it('bounds the health probe separately from the per-item decision deadline', async () => {
+    // A liveness probe must not inherit the 120s DECISION budget: with a live
+    // CPU-served 6 GB model, `doctor` blocked past its own 30s ceiling and the
+    // unresolved probe then corrupted the next CLI test's captured output.
+    const hanging: ClefTransport = { post: () => new Promise(() => {}) };
+    const provider = new ClefProvider(
+      { endpoint: 'http://127.0.0.1:11434' },
+      { transport: hanging, deadlineMs: 60_000, healthTimeoutMs: 60 },
+    );
+    const started = Date.now();
+    const result = await provider.health();
+    const elapsed = Date.now() - started;
+    expect(elapsed).toBeLessThan(5_000);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.detail).toMatch(/probe|deadline|timeout/i);
+    await provider.close();
+  }, 10_000);
+
   it('retries once for a transient failure and records the failure permanently otherwise', async () => {
     let calls = 0;
     const flaky: ClefTransport = {

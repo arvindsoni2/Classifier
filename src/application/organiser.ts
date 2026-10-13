@@ -381,7 +381,18 @@ export class Organiser {
     const conflicts: { basename: string; reason: string }[] = [];
     let failed = 0;
     const manifest = await provider.health();
-    const manifests = manifest.ok ? [manifest.value] : [];
+    if (!manifest.ok) {
+      // Without a manifest there is no declared token budget, and a request
+      // built without one is unchecked against the provider's limits — which
+      // is how oversize prompts reached the endpoint and came back as opaque
+      // per-item failures (pilot finding). Refuse; never classify budgetless.
+      throw new Error(
+        `PROVIDER_UNAVAILABLE: ${provider.providerId} could not report its decision budget ` +
+          `(${manifest.code}: ${manifest.detail}); classification refused rather than running ` +
+          `without the provider's token limits`,
+      );
+    }
+    const manifests = [manifest.value];
 
     const extractor = createExtractor();
     for (const item of items) {

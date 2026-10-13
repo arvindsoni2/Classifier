@@ -30,14 +30,18 @@ export interface ProviderHealth {
 export interface DoctorDeps {
   transport?: ClefTransport;
   deadlineMs?: number;
+  healthTimeoutMs?: number;
 }
 
 export function loadProviderConfig(
-  path: string = join(process.cwd(), 'config', 'local', 'providers.json'),
+  path?: string,
+  env: Record<string, string | undefined> = process.env,
 ): ProviderConfig {
-  if (!existsSync(path)) return {};
+  const resolved =
+    path ?? env.ORGANISER_PROVIDER_CONFIG ?? join(process.cwd(), 'config', 'local', 'providers.json');
+  if (!existsSync(resolved)) return {};
   try {
-    const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'));
+    const parsed: unknown = JSON.parse(readFileSync(resolved, 'utf8'));
     if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
       return parsed as ProviderConfig;
     }
@@ -62,40 +66,44 @@ export async function probeProviders(
   config: ProviderConfig = loadProviderConfig(),
   deps: DoctorDeps = {},
 ): Promise<ProviderHealth[]> {
-  const health: ProviderHealth[] = [];
-
-  const rules = new RulesProvider();
-  health.push(await record('rules', rules.health()));
-  await rules.close();
-
-  const laya = new LayaProvider(config.laya ?? {});
-  health.push(await record('laya', laya.health()));
-  await laya.close();
-
-  const transportDeps = (): { transport?: ClefTransport; deadlineMs?: number } => {
-    const injected: { transport?: ClefTransport; deadlineMs?: number } = {};
+  const transportDeps = (): {
+    transport?: ClefTransport;
+    deadlineMs?: number;
+    healthTimeoutMs?: number;
+  } => {
+    const injected: { transport?: ClefTransport; deadlineMs?: number; healthTimeoutMs?: number } = {};
     if (deps.transport !== undefined) injected.transport = deps.transport;
     if (deps.deadlineMs !== undefined) injected.deadlineMs = deps.deadlineMs;
+    if (deps.healthTimeoutMs !== undefined) injected.healthTimeoutMs = deps.healthTimeoutMs;
     return injected;
   };
 
-  if (config.clef?.endpoint === undefined) {
-    health.push({
-      provider: 'clef',
-      status: 'blocked',
-      detail: 'no endpoint configured in config/local/providers.json',
-    });
-  } else {
-    const clef = new ClefProvider({ endpoint: config.clef.endpoint }, transportDeps());
-    health.push(await record('clef', clef.health()));
-    await clef.close();
-  }
-
+  // Probes run concurrently, so `doctor` costs the SLOWEST provider instead of
+  // the sum of all of them. Reported order stays fixed for stable output.
+  const rules = new RulesProvider();
+  const laya = new LayaProvider(config.laya ?? {});
+  const clef =
+    config.clef?.endpoint === undefined
+      ? null
+      : new ClefProvider({ endpoint: config.clef.endpoint }, transportDeps());
   const jev = new JevProvider(config.jev ?? {}, transportDeps());
-  health.push(await record('jev', jev.health()));
-  await jev.close();
 
-  return health;
+  const [rulesHealth, layaHealth, clefHealth, jevHealth] = await Promise.all([
+    record('rules', rules.health()),
+    record('laya', laya.health()),
+    clef === null
+      ? Promise.resolve<ProviderHealth>({
+          provider: 'clef',
+          status: 'blocked',
+          detail: 'no endpoint configured in config/local/providers.json',
+        })
+      : record('clef', clef.health()),
+    record('jev', jev.health()),
+  ]);
+
+  await Promise.all([rules.close(), laya.close(), clef?.close(), jev.close()]);
+
+  return [rulesHealth, layaHealth, clefHealth, jevHealth];
 }
 
 export async function main(): Promise<void> {

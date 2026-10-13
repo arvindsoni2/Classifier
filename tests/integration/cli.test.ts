@@ -54,12 +54,29 @@ async function run(args: string[], env: Record<string, string> = {}): Promise<Cl
 
 describe('CLI — same service, no bypass', () => {
   it('doctor reports provider health through the same probe', async () => {
-    const result = await run(['doctor']);
+    // Hermetic: an explicit provider config pointing at a CLOSED loopback
+    // port. Without it the test reads the gitignored, developer-local
+    // config/local/providers.json and, when a real CPU-served model happens to
+    // be running, `doctor` legitimately takes ~25s and blows the test budget.
+    const dir = mkdtempSync(join(tmpdir(), 'cli-doctor-'));
+    fixtures.push(dir);
+    const configPath = join(dir, 'providers.json');
+    writeFileSync(
+      configPath,
+      JSON.stringify({ clef: { endpoint: 'http://127.0.0.1:1' } }),
+      'utf8',
+    );
+    const result = await run(['doctor'], { ORGANISER_PROVIDER_CONFIG: configPath });
     expect(result.exitCode).toBe(0);
-    const parsed = JSON.parse(result.stdout) as { providers: { provider: string; status: string }[] };
+    const parsed = JSON.parse(result.stdout) as {
+      providers: { provider: string; status: string }[];
+      configSource: string;
+    };
     expect(parsed.providers.map((entry) => entry.provider)).toEqual(
       expect.arrayContaining(['rules', 'laya', 'clef', 'jev']),
     );
+    // The unreachable endpoint is reported, never substituted or skipped.
+    expect(parsed.providers.find((entry) => entry.provider === 'clef')?.status).toBe('blocked');
   });
 
   it('eval:fixture stays deterministic through the CLI path', async () => {
