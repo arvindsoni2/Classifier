@@ -31,6 +31,29 @@ export function makePdf(pages: readonly (readonly string[])[]): Buffer {
   return assemblePdf(objects);
 }
 
+/** Builds a PDF with a document information dictionary, which is what pdfinfo reports. */
+export function makePdfWithInfo(info: Readonly<Record<string, string>>, pages: number): Buffer {
+  const objects: (string | undefined)[] = [];
+  const kids = Array.from({ length: pages }, (_, i) => `${5 + i * 2} 0 R`).join(' ');
+  objects[1] = '<< /Type /Catalog /Pages 2 0 R /Info 4 0 R >>';
+  objects[2] = `<< /Type /Pages /Kids [ ${kids} ] /Count ${pages} >>`;
+  objects[3] = '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>';
+  const entries = Object.entries(info)
+    .map(([key, value]) => `/${key} (${value.replace(/([()\\])/g, '\\$1')})`)
+    .join(' ');
+  objects[4] = `<< ${entries} >>`;
+  for (let i = 0; i < pages; i++) {
+    const pageNum = 5 + i * 2;
+    const contentNum = pageNum + 1;
+    objects[pageNum] =
+      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] ` +
+      `/Resources << /Font << /F1 3 0 R >> >> /Contents ${contentNum} 0 R >>`;
+    const content = 'BT /F1 12 Tf 72 720 Td 14 TL\n(Body line) Tj T*\nET';
+    objects[contentNum] = `<< /Length ${content.length} >>\nstream\n${content}\nendstream`;
+  }
+  return assemblePdf(objects, 4);
+}
+
 /** Builds a structurally valid PDF whose pages render no text at all. */
 export function makeScannedPdf(pages: number): Buffer {
   const objects: (string | undefined)[] = [];
@@ -51,7 +74,7 @@ export function makeScannedPdf(pages: number): Buffer {
   return assemblePdf(objects);
 }
 
-function assemblePdf(objects: (string | undefined)[]): Buffer {
+function assemblePdf(objects: (string | undefined)[], infoObject?: number): Buffer {
   let out = '%PDF-1.4\n';
   const offsets: number[] = [0];
   for (let i = 1; i < objects.length; i++) {
@@ -62,11 +85,12 @@ function assemblePdf(objects: (string | undefined)[]): Buffer {
   }
   const xrefPos = out.length;
   const count = objects.length;
+  const info = infoObject === undefined ? '' : ` /Info ${infoObject} 0 R`;
   out += `xref\n0 ${count}\n0000000000 65535 f \n`;
   for (let i = 1; i < count; i++) {
     out += `${String(offsets[i]).padStart(10, '0')} 00000 n \n`;
   }
-  out += `trailer << /Size ${count} /Root 1 0 R >>\nstartxref\n${xrefPos}\n%%EOF\n`;
+  out += `trailer << /Size ${count} /Root 1 0 R${info} >>\nstartxref\n${xrefPos}\n%%EOF\n`;
   return Buffer.from(out, 'latin1');
 }
 
@@ -170,5 +194,66 @@ export function makeDocx(paragraphs: readonly string[]): Buffer {
     { name: '[Content_Types].xml', data: '<?xml version="1.0"?><Types/>' },
     { name: '_rels/.rels', data: '<?xml version="1.0"?><Relationships/>' },
     { name: 'word/document.xml', data: document },
+  ]);
+}
+
+/** Builds a DOCX carrying a `docProps/core.xml`, which is what the office extractor reads. */
+export function makeDocxWithCoreProperties(coreXml: string): Buffer {
+  return makeZip([
+    { name: '[Content_Types].xml', data: '<?xml version="1.0"?><Types/>' },
+    { name: 'word/document.xml', data: makeDocumentXml('Body') },
+    { name: 'docProps/core.xml', data: coreXml },
+  ]);
+}
+
+function makeDocumentXml(paragraph: string): string {
+  return (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
+    `<w:body><w:p><w:r><w:t xml:space="preserve">${escapeXml(paragraph)}</w:t></w:r></w:p></w:body></w:document>`
+  );
+}
+
+/** EPUB metadata lives in the OPF named by `META-INF/container.xml`. */
+export interface EpubMetadata {
+  title?: string;
+  creator?: string;
+  subject?: string;
+  language?: string;
+  publisher?: string;
+  date?: string;
+  /** Written verbatim, so a malformed-OPF fixture can be built too. */
+  opfOverride?: string;
+  /** Where the OPF lives; the container points at it. */
+  opfPath?: string;
+}
+
+export function makeEpub(metadata: EpubMetadata): Buffer {
+  const opfPath = metadata.opfPath ?? 'OEBPS/content.opf';
+  const field = (tag: string, value: string | undefined): string =>
+    value === undefined ? '' : `<dc:${tag}>${escapeXml(value)}</dc:${tag}>`;
+  const opf =
+    metadata.opfOverride ??
+    '<?xml version="1.0" encoding="UTF-8"?>' +
+      '<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id">' +
+      '<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">' +
+      field('title', metadata.title) +
+      field('creator', metadata.creator) +
+      field('subject', metadata.subject) +
+      field('language', metadata.language) +
+      field('publisher', metadata.publisher) +
+      field('date', metadata.date) +
+      '</metadata></package>';
+  return makeZip([
+    { name: 'mimetype', data: 'application/epub+zip', method: 0 },
+    {
+      name: 'META-INF/container.xml',
+      data:
+        '<?xml version="1.0"?><container version="1.0" ' +
+        'xmlns="urn:oasis:names:tc:opendocument:xmlns:container">' +
+        `<rootfiles><rootfile full-path="${opfPath}" media-type="application/oebps-package+xml"/>` +
+        '</rootfiles></container>',
+    },
+    { name: opfPath, data: opf },
   ]);
 }

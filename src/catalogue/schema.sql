@@ -81,6 +81,22 @@ CREATE TABLE IF NOT EXISTS bundles (
   UNIQUE (root_id, rel_path)
 );
 
+-- One row per item and extractor (plan Task 4). A row is a result, not an
+-- action: `fields_json` holds what the extractor read, never a path or a
+-- command. `unavailable` means the tool is not on this machine, which is not
+-- the same as `failed`; both are retryable on the next scan.
+CREATE TABLE IF NOT EXISTS metadata (
+  item_id           INTEGER NOT NULL REFERENCES items(id),
+  extractor         TEXT    NOT NULL,
+  extractor_version TEXT    NOT NULL,
+  -- ok | unavailable | failed | timeout
+  status            TEXT    NOT NULL
+    CHECK (status IN ('ok', 'unavailable', 'failed', 'timeout')),
+  fields_json       TEXT    NOT NULL DEFAULT '{}',
+  extracted_scan    INTEGER REFERENCES scans(id),
+  PRIMARY KEY (item_id, extractor)
+);
+
 CREATE TABLE IF NOT EXISTS scan_errors (
   id        INTEGER PRIMARY KEY,
   scan_id   INTEGER NOT NULL REFERENCES scans(id),
@@ -98,5 +114,6 @@ CREATE INDEX IF NOT EXISTS items_by_root_status ON items (root_id, status);
 CREATE INDEX IF NOT EXISTS items_by_seen  ON items (root_id, last_seen_scan);
 CREATE INDEX IF NOT EXISTS dirs_by_scan   ON dirs (root_id, last_seen_scan);
 CREATE INDEX IF NOT EXISTS errors_by_scan  ON scan_errors (scan_id);
+CREATE INDEX IF NOT EXISTS metadata_by_status ON metadata (extractor, status);
 CREATE INDEX IF NOT EXISTS bundles_by_parent ON bundles (parent_bundle_id);
 CREATE INDEX IF NOT EXISTS bundles_by_scan  ON bundles (detected_scan);

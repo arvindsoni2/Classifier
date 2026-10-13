@@ -8,7 +8,6 @@
  */
 import { createHash } from 'node:crypto';
 import type { FileHandle } from 'node:fs/promises';
-import { inflateRawSync } from 'node:zlib';
 import {
   err,
   ok,
@@ -17,6 +16,8 @@ import {
   type Item,
   type Result,
 } from '../../domain/contracts.js';
+import { decodeXmlEntities } from '../../shared/xml.js';
+import { findZipEntry, readZipEntryData } from '../../shared/zip.js';
 import { runChild, type ChildRunResult } from './worker.js';
 
 export const EXTRACTOR_REVISION = 'extract@1.0.0';
@@ -226,129 +227,8 @@ function parsePdfRun(run: ChildRunResult, limits: ExtractionLimits): TextOutcome
 }
 
 // --- DOCX (forward-only ZIP + XML scanning) --------------------------------
-
-const EOCD_SIGNATURE = 0x06054b50;
-const CENTRAL_SIGNATURE = 0x02014b50;
-const LOCAL_SIGNATURE = 0x04034b50;
-
-interface ZipEntryRecord {
-  method: number;
-  compressedSize: number;
-  uncompressedSize: number;
-  localOffset: number;
-}
-
-function findZipEntry(file: Buffer, wanted: string): Result<ZipEntryRecord> {
-  const scanStart = Math.max(0, file.length - 65_557);
-  let eocd = -1;
-  for (let i = file.length - 22; i >= scanStart; i--) {
-    if (file.readUInt32LE(i) === EOCD_SIGNATURE) {
-      eocd = i;
-      break;
-    }
-  }
-  if (eocd < 0) {
-    return err('EXTRACTION_FAILED', 'malformed DOCX: end-of-central-directory record not found (truncated or not a ZIP)');
-  }
-  const entryCount = file.readUInt16LE(eocd + 10);
-  let offset = file.readUInt32LE(eocd + 16);
-  if (offset + 46 > file.length) {
-    return err('EXTRACTION_FAILED', 'malformed DOCX: central directory offset outside the file');
-  }
-  for (let i = 0; i < entryCount; i++) {
-    if (offset + 46 > file.length || file.readUInt32LE(offset) !== CENTRAL_SIGNATURE) {
-      return err('EXTRACTION_FAILED', 'malformed DOCX: central directory entry truncated');
-    }
-    const method = file.readUInt16LE(offset + 10);
-    const compressedSize = file.readUInt32LE(offset + 20);
-    const uncompressedSize = file.readUInt32LE(offset + 24);
-    const nameLength = file.readUInt16LE(offset + 28);
-    const extraLength = file.readUInt16LE(offset + 30);
-    const commentLength = file.readUInt16LE(offset + 32);
-    const localOffset = file.readUInt32LE(offset + 42);
-    if (offset + 46 + nameLength > file.length) {
-      return err('EXTRACTION_FAILED', 'malformed DOCX: central directory name truncated');
-    }
-    const name = file.toString('utf8', offset + 46, offset + 46 + nameLength);
-    if (name === wanted) {
-      return ok({ method, compressedSize, uncompressedSize, localOffset });
-    }
-    offset += 46 + nameLength + extraLength + commentLength;
-  }
-  return err('EXTRACTION_FAILED', `not a DOCX: ${wanted} entry missing from the archive`);
-}
-
-function readZipEntryData(file: Buffer, record: ZipEntryRecord, budget: number): Result<Buffer> {
-  if (record.uncompressedSize === 0xffffffff || record.compressedSize === 0xffffffff) {
-    return err('EXTRACTION_FAILED', 'unsupported ZIP64 entry');
-  }
-  if (record.uncompressedSize > budget) {
-    return err(
-      'EXTRACTION_FAILED',
-      `uncompressed entry is ${record.uncompressedSize} bytes, above the ${budget}-byte budget; zip bomb refused`,
-    );
-  }
-  if (record.localOffset + 30 > file.length || file.readUInt32LE(record.localOffset) !== LOCAL_SIGNATURE) {
-    return err('EXTRACTION_FAILED', 'malformed DOCX: local header not found at the recorded offset');
-  }
-  const nameLength = file.readUInt16LE(record.localOffset + 26);
-  const extraLength = file.readUInt16LE(record.localOffset + 28);
-  const dataStart = record.localOffset + 30 + nameLength + extraLength;
-  const dataEnd = dataStart + record.compressedSize;
-  if (dataEnd > file.length) {
-    return err('EXTRACTION_FAILED', 'malformed DOCX: entry data runs past the end of the file');
-  }
-  const data = file.subarray(dataStart, dataEnd);
-  if (record.method === 0) return ok(data);
-  if (record.method === 8) {
-    try {
-      return ok(inflateRawSync(data, { maxOutputLength: budget }));
-    } catch {
-      return err('EXTRACTION_FAILED', 'malformed DOCX: deflate stream failed to decompress');
-    }
-  }
-  return err('EXTRACTION_FAILED', `unsupported ZIP compression method ${record.method}`);
-}
-
-const XML_ENTITIES: Record<string, string> = {
-  amp: '&',
-  lt: '<',
-  gt: '>',
-  quot: '"',
-  apos: "'",
-};
-
-/** Entities must reference real code points: no out-of-range or lone surrogates. */
-function invalidCodePoint(codePoint: number): boolean {
-  return (
-    !Number.isFinite(codePoint) ||
-    codePoint < 0 ||
-    codePoint > 0x10ffff ||
-    (codePoint >= 0xd800 && codePoint <= 0xdfff)
-  );
-}
-
-function decodeXmlEntities(text: string): string {
-  return text.replace(/&(#x?[0-9a-fA-F]+|[a-zA-Z]+);/g, (match, entity: string) => {
-    const named = XML_ENTITIES[entity];
-    if (named !== undefined) return named;
-    if (entity.startsWith('#x') || entity.startsWith('#X')) {
-      const codePoint = Number.parseInt(entity.slice(2), 16);
-      if (invalidCodePoint(codePoint)) {
-        throw new RangeError(`invalid XML code point in entity ${match}`);
-      }
-      return String.fromCodePoint(codePoint);
-    }
-    if (entity.startsWith('#')) {
-      const codePoint = Number.parseInt(entity.slice(1), 10);
-      if (invalidCodePoint(codePoint)) {
-        throw new RangeError(`invalid XML code point in entity ${match}`);
-      }
-      return String.fromCodePoint(codePoint);
-    }
-    return match;
-  });
-}
+// The ZIP reader and the entity decoder now live in src/shared, so the
+// catalogue's epub and office extractors use exactly this implementation.
 
 /**
  * Forward-only scanner over word/document.xml: collects <w:t> text, tabs and

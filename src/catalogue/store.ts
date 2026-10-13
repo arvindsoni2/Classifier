@@ -73,6 +73,18 @@ export interface BundleRow {
   detectedScan: number;
 }
 
+export type MetadataStatus = 'ok' | 'unavailable' | 'failed' | 'timeout';
+
+/** One extractor result for one item (plan Task 4). */
+export interface MetadataRow {
+  itemId: number;
+  extractor: string;
+  extractorVersion: string;
+  status: MetadataStatus;
+  fieldsJson: string;
+  extractedScan: number;
+}
+
 /** What an upsert has to know to decide whether hashes survive the scan. */
 interface ExistingItem {
   dev: string;
@@ -115,6 +127,8 @@ export interface CatalogueStore {
   setDirBundle(dirId: number, bundleId: number): void;
   /** Records that a bundle became a child of another bundle. */
   setBundleParent(bundleId: number, parentBundleId: number): void;
+  /** Writes one extractor result, replacing any earlier result for that pair. */
+  upsertMetadata(row: MetadataRow): void;
   close(): void;
 }
 
@@ -177,6 +191,9 @@ export function openStore(dataDir: string): CatalogueStore {
      WHERE id = @id`,
   );
   const dropHashes = db.prepare('UPDATE items SET partial_hash = NULL, sha256 = NULL, bundle_id = NULL WHERE id = ?');
+  // A changed file's extracted metadata describes bytes that no longer exist, so
+  // it goes with the hashes. Rows are deleted only from the catalogue.
+  const dropMetadata = db.prepare('DELETE FROM metadata WHERE item_id = ?');
   const markMissing = db.prepare(
     `UPDATE items SET status = 'missing' WHERE root_id = ? AND status <> 'missing' AND last_seen_scan <> ?`,
   );
@@ -251,6 +268,7 @@ export function openStore(dataDir: string): CatalogueStore {
           }
           insertItem.run(row);
           dropHashes.run(existing.id);
+          dropMetadata.run(existing.id);
         }
       });
       write(rows);
@@ -309,6 +327,16 @@ export function openStore(dataDir: string): CatalogueStore {
 
     setBundleParent(bundleId, parentBundleId) {
       db.prepare('UPDATE bundles SET parent_bundle_id = ? WHERE id = ?').run(parentBundleId, bundleId);
+    },
+
+    upsertMetadata(row) {
+      db.prepare(
+        `INSERT INTO metadata (item_id, extractor, extractor_version, status, fields_json, extracted_scan)
+         VALUES (@itemId, @extractor, @extractorVersion, @status, @fieldsJson, @extractedScan)
+         ON CONFLICT (item_id, extractor) DO UPDATE SET
+           extractor_version = excluded.extractor_version, status = excluded.status,
+           fields_json = excluded.fields_json, extracted_scan = excluded.extracted_scan`,
+      ).run(row);
     },
 
     close() {
