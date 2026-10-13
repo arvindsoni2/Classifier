@@ -9,6 +9,7 @@ import { createHash } from 'node:crypto';
 import {
   chmodSync,
   existsSync,
+  mkdirSync,
   readdirSync,
   readFileSync,
   rmSync,
@@ -119,8 +120,12 @@ describe('catalogue scanner (Phase 1 Task 1)', () => {
       '__pycache__/thing.pyc',
     ]);
     const outside = join(fx.parent, 'outside');
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(join(outside, 'secret.txt'), 'outside the root, must not be catalogued\n');
     writeFileSync(join(fx.parent, 'outside-secret.txt'), 'must not be catalogued\n');
-    // A directory symlink pointing out of the root, and a file symlink.
+    // A directory symlink pointing at a real directory outside the root, and a
+    // file symlink. The directory has to exist: a dangling link proves nothing,
+    // because a scanner that followed it would find no files to catalog.
     symlinkSync(outside, join(fx.root, 'escape'));
     symlinkSync(join(fx.parent, 'outside-secret.txt'), join(fx.root, 'escape.txt'));
     const store = storeFor(fx);
@@ -135,6 +140,10 @@ describe('catalogue scanner (Phase 1 Task 1)', () => {
     expect(catalogued).not.toContain('escape');
     expect(catalogued).not.toContain('escape.txt');
     expect(catalogued.some((path) => path.includes('outside-secret'))).toBe(false);
+    // Nothing inside the linked directory was catalogued under it, and the file
+    // that really lives there was not catalogued at all.
+    expect(catalogued.filter((path) => path.startsWith('escape/'))).toEqual([]);
+    expect(catalogued.some((path) => path.includes('secret.txt'))).toBe(false);
     // They are still counted, so the totals stay honest.
     expect(result.totals.symlinksSeen).toBe(2);
   });
