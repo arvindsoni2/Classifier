@@ -185,3 +185,140 @@ This is the concrete cost of rule 9 being untestable in Task 1.
   both passes are naturally idempotent across rescans.
 - `hashing.ts` exports `PARTIAL_WINDOW_BYTES`; the 128 KiB threshold is
   `2 * PARTIAL_WINDOW_BYTES` and is computed, not retyped.
+
+---
+
+## Task 3 — Bundle detection
+
+**Commit:** `74a6588` — `feat(catalogue): deterministic bundle detection`
+
+**Files:** `src/catalogue/bundle-rules.ts`, `src/catalogue/bundles.ts`,
+`tests/catalogue/bundles.test.ts`, plus `src/catalogue/schema.sql` (the
+`bundles` table), `src/catalogue/store.ts` (four bundle methods, the
+`BundleType`/`BundleRow` types) and `src/catalogue/scanner.ts` (hook signature,
+boundary handling, `bundlesSeen`).
+
+**Tests:** 17 new tests in `tests/catalogue/bundles.test.ts`. Full suite **249
+passed** (232 after Task 2 + 17 new), all on synthetic fixture trees.
+`pnpm typecheck`, `pnpm lint` and `pnpm test` all pass. Nothing was run against
+a real home directory, Downloads folder or Drive account.
+
+Tests were written first and observed failing (module absent) before
+implementation. Non-vacuousness was checked with thirteen deliberate breaks.
+Three survived the first pass and each one changed something:
+
+| Mutation | Result |
+| --- | --- |
+| `.git` no longer forces `code_repo` | caught: `code_repo is recorded and never descended into` |
+| Project markers never detected | caught: `code_project is recorded and never descended into` |
+| Hook records but never stops the walk | caught: all three code tests |
+| Hook records no scan id | caught: code tests and the rescan test |
+| Root guard removed from the hook | caught: `the root directory itself is never a bundle` |
+| Root eligible in the post-scan pass | caught: same test |
+| Course↔album precedence swapped | **survived** → added `course outranks album when both rules match` |
+| Parents adopt any bundle child | **survived** → added an album subdirectory to the parent fixture |
+| Course minimum 3 → 1 | caught: `two numbered videos are not a course` |
+| Course 60% rule dropped | caught: `unnumbered videos are not a course` |
+| Course keyword markers ignored | **survived** → added `keyword markers alone can carry a course` |
+| Photo-set minimum 10 → 1 | caught: `photo sets need ten images…` and the extracted-archive test |
+| Sibling-archive name comparison broken | caught: `a directory beside its own archive…` |
+
+The three survivors were gaps in the fixtures, not in the rules: precedence was
+only ever exercised between album and photo_set, the course parent's children
+were all courses, and nothing separated the keyword branch of the marker from
+the leading-number branch.
+
+### Defect found and fixed here
+
+The scanner's `onDirectory` hook was wired in Task 1 but never exercised. Its
+original signature could not work for Task 3: it received `relPath` and names
+but no `rootId` and no `scanId`, and the hook's `false` return skipped the
+`dirs` row as well as the descent. Changed to a `ScanDirectoryContext` object
+and the boundary now records the directory, then stops. `ScanHooks` has one
+consumer, so there was no other call site to update.
+
+### Decisions and interpretations
+
+1. **Split into `bundle-rules.ts` and `bundles.ts`.** The first draft of
+   `bundles.ts` was 464 lines, over the ~400 line ceiling in AGENTS.md rule 9.
+   The rules are pure functions of names and counts; the orchestration reads the
+   catalogue and writes rows. Splitting on that seam makes the rules testable
+   without a database and keeps both files small.
+2. **The configured root is never a bundle.** The plan does not say so, but a
+   bundle is a unit *inside* a root; bundling the root would make the entire
+   root one item and hide every file in it from the report. Both passes skip
+   `rel_path = ''` and the hook returns nothing there. Pinned by a test that puts
+   a `.git` and three numbered videos directly in the root.
+3. **`code_repo`/`code_project` precedence needs no code.** My first draft read
+   the boundary bundle rows and skipped them. That check was dead: the walk
+   stopped there, so those directories have no catalogued files and no
+   catalogued children, and neither pass can match on exactly those. The
+   precedence is structural. The dead check and its query are removed, and the
+   module says why.
+4. **Integer percentages.** `count * 100 >= total * percent` rather than
+   `count / total >= 0.6`. 3 of 5 and 6 of 10 both land exactly on the boundary,
+   and the plan states the rule as "≥60%". Float division would make the outcome
+   depend on which side of the representable gap the ratio fell.
+5. **`extracted_archive` reads the parent's archives.** The archive sits *beside*
+   the directory, not inside it, so `DirFacts` carries `siblingArchives`. The
+   first draft looked for it among the directory's own files and never fired —
+   caught by the extracted-archive test.
+6. **A course parent's counts aggregate its modules, not its own files.** The
+   plan gives no rule text for the count. Folding a parent's loose files into a
+   total that also includes its modules would double-count them; the modules'
+   totals already cover the subtree.
+7. **Only course bundles are adopted.** The plan says "the subdirectories become
+   child bundles", read as applying to the subdirectories that are courses — the
+   clause's subject. Any subdirectory name, numbered or not, counts towards the
+   ≥60% naming ratio. The parent test pins both halves with a numbered album
+   beside two numbered modules.
+8. **A directory keeps one bundle row** (`UNIQUE(root_id, rel_path)`), and
+   precedence resolves to a single type. When the shape changes on a rescan the
+   row is updated in place, so bundle ids stay stable.
+9. **`code_bundle` marker choice is sorted.** Directory listing order is the
+   filesystem's, so the first matching marker would make `rule` text vary
+   between scans. Matching markers are sorted before one is chosen.
+10. **Items are attached by `dir_id`, not by path prefix.** A prefix would let a
+    bundle claim items of a nested directory that has its own bundle; matching
+    the directory makes double membership impossible.
+
+### Changed outside the task's file list
+
+`src/catalogue/scanner.ts` — the hook signature and boundary handling, as above.
+The plan explicitly says to "add a hook to the scanner so that when a
+directory's listing contains `.git` or a project marker, the bundle row is
+created and the scanner does not descend further", so this is the sanctioned
+change, but it is a Task 1 file.
+
+### Deferred, with reasons
+
+1. **No bundle rows are ever removed or marked stale.** If a directory stops
+   matching — the `pyproject.toml` is deleted, a course loses its numbering —
+   its old row keeps its previous `detected_scan` and stays in `bundles`. The
+   post-scan pass has no way to know: a code bundle's contents are deliberately
+   not catalogued, so it cannot re-check them, and the plan's schema has no
+   status column. A rescan therefore updates rows that still match and leaves
+   the rest. Deciding what a stale bundle means for a report belongs with the
+   report (Task 5); it should not be guessed at here.
+2. **`ScanTotals.bundlesSeen` is not persisted**, like `symlinksSeen` in Task 1:
+   the plan's `scans` table has no column for it. It counts boundaries found
+   during the walk, not bundles detected afterwards.
+3. **`bundles_seen` on the scan row and `bundles` in the report** are Task 5's
+   problem; `listBundles()` exists so it does not have to write SQL.
+4. **Detection holds one scan's directories and members in memory.** A
+   single-root pass is the size of the catalogue's directory list; unlike the
+   scanner, this pass is allowed to see everything at once because it reads the
+   database, not the filesystem. If a root ever holds millions of rows this
+   becomes the first thing to stream.
+
+### Notes for the next session
+
+- `scan(config, store, { onDirectory: bundleScanHook(store) })` then
+  `detectBundles(store, scanId)` is the whole sequence. Nothing is automatic
+  yet: Task 5's CLI will have to call both, and `detectBundles` will run after
+  `computeHashes` so a bundle's duplicate suppression is visible in the report.
+- `bundleScanHook` must be given a `store`, not a database handle, so bundle
+  writes go through the store like every other catalogue write.
+- The rules module exports its thresholds as named constants, so a later
+  revision (Task 4 upgrades `album` to "≥80% share an album tag") is a one-line
+  change plus the metadata extractor.
