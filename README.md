@@ -1,5 +1,7 @@
 # Fedora organiser
 
+> **Pivot in progress (branch `pivot/catalogue-first`).** The project is moving from a Downloads-only pilot to a catalogue-first organiser for files, bookmarks and Google Drive. Start with `docs/10-Catalogue-First-Spec.md`, then `docs/11-Phase-1-Plan.md`. `AGENTS.md` is for the implementing agent; `CLAUDE.md` is for the reviewer. The description below is the earlier pilot.
+
 A local-first Downloads organiser for Fedora: read-only discovery, typed model
 decisions, reviewed placements, and overwrite-safe moves behind explicit
 approval. Nothing moves without your confirmation inside the app.

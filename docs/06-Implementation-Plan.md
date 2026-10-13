@@ -1,5 +1,7 @@
 # Fedora Downloads Organiser Implementation Plan
 
+> **Superseded on branch `pivot/catalogue-first` (2026-10-13).** The scope and classification design here are replaced by `docs/10-Catalogue-First-Spec.md` and its phase plans. Move-safety requirements still apply from Phase 5.
+
 > **For agentic workers:** Use superpowers:executing-plans when available to implement this plan task-by-task. Execution method is OpenCode as specified by the user; delegation is optional only when explicitly authorised. Steps use checkbox syntax for tracking.
 
 **Goal:** Organise direct-child Downloads files into reviewed Downloads folders and produce reproducible Laya/Clef evaluation evidence.
@@ -168,9 +170,9 @@ Project scripts created in Task 1: `test` (Vitest), `test:e2e` (Playwright), `ty
 
 - [x] Run `pnpm test`, `pnpm test:native`, `pnpm test:e2e`, `pnpm typecheck`, `pnpm lint`, `pnpm build` and `pnpm eval:fixture`; record exact commands/exit statuses.
 - [x] Run doctor on the laptop using synthetic inference/fixture operations. Record CPU/RAM/GPU, exact Laya/Clef/runtime revisions and memory/latency. Missing Clef health produces a blocked comparison, not substituted chat results.
-- [ ] Create development/calibration/test labels with Arvind and run matched treatments. Report held-out performance, failed cases and proposed usefulness targets without tuning against test labels.
+- [ ] **Superseded 2026-10-13 by docs/10-Catalogue-First-Spec.md (Phase 4 evaluation uses labels from trusted folders).** ~~Create development/calibration/test labels with Arvind and run matched treatments. Report held-out performance, failed cases and proposed usefulness targets without tuning against test labels.~~
 - [x] Configure resolved Downloads root in read-only mode; show scan/exclusions, taxonomy and proposed additions. Do not create a runtime approval on the user's behalf from development approval.
-- [ ] After the user approves a concrete small batch in the app, execute up to ten initial moves, inspect receipts, request undo for one eligible action and inspect recovery. This step remains pending until runtime approval exists; elapsed time does not provide approval.
+- [ ] **Superseded 2026-10-13 by docs/10-Catalogue-First-Spec.md (Phase 5).** ~~After the user approves a concrete small batch in the app, execute up to ten initial moves, inspect receipts, request undo for one eligible action and inspect recovery. This step remains pending until runtime approval exists; elapsed time does not provide approval.~~
 - [x] Write extension guidance covering normalised source capabilities, future account/API discovery and narrow MCP read tools. External writes/MCP approval transport need separate review.
 - [x] Commit the documentation and reviewed code changes; do not commit private files, credentials, labels or evidence blobs. Supply Codex with diff plus verification evidence for final review.
 
