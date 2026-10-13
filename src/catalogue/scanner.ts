@@ -27,13 +27,25 @@ export interface ScanResult {
   elapsedMs: number;
 }
 
+/** One directory as the scanner sees it, handed to `onDirectory`. */
+export interface ScanDirectoryContext {
+  rootId: number;
+  scanId: number;
+  /** Path relative to the root; empty string for the root itself. */
+  relPath: string;
+  /** Absolute path, for callers that need to stat it. */
+  absPath: string;
+  /** Every entry name, including hidden ones, so `.git` is visible. */
+  names: readonly string[];
+}
+
 /**
- * Hook for later phases. `onDirectory` receives every entry name in a directory
- * (including hidden ones, so `.git` can be noted) and may return `false` to
- * stop the scanner descending — how Task 3 stops at a bundle boundary.
+ * Hook for later phases. `onDirectory` receives the directory's listing
+ * (including hidden names) and may return `false` to stop the scanner
+ * descending — how Task 3 stops at a bundle boundary.
  */
 export interface ScanHooks {
-  onDirectory?: (relPath: string, names: readonly string[]) => boolean | void;
+  onDirectory?: (dir: ScanDirectoryContext) => boolean | void;
 }
 
 interface PendingDir {
@@ -137,10 +149,7 @@ async function scanRoot(
     }
     totals.symlinksSeen += listing.symlinks;
 
-    if (hooks.onDirectory?.(rel, listing.allNames) === false) {
-      // A bundle boundary: recorded by the caller, never descended into.
-      continue;
-    }
+    const boundary = hooks.onDirectory?.({ rootId, scanId, relPath: rel, absPath: current.absPath, names: listing.allNames }) === false;
 
     try {
       const stat = await lstat(current.absPath, { bigint: true });
@@ -155,6 +164,13 @@ async function scanRoot(
       };
       const dirId = store.upsertDir(dirRow);
       totals.dirsSeen += 1;
+
+      if (boundary) {
+        // A bundle directory is recorded and counted, but nothing inside it is
+        // catalogued: no items, no child directories, no descent.
+        totals.bundlesSeen += 1;
+        continue;
+      }
 
       for (const name of listing.dirs) {
         const childRel = rel === '' ? name : `${rel}/${name}`;
@@ -287,6 +303,7 @@ export async function scan(
     filesHashed: 0,
     errors: 0,
     symlinksSeen: 0,
+    bundlesSeen: 0,
   };
 
   try {

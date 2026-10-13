@@ -62,6 +62,25 @@ CREATE TABLE IF NOT EXISTS items (
   UNIQUE (root_id, rel_path)
 );
 
+-- A bundle is a directory treated as one catalogue unit (plan Task 3):
+-- `code_repo` and `code_project` stop the walk, so their contents are never
+-- items and member_count/total_size stay null; every other type keeps its
+-- members as items carrying bundle_id.
+CREATE TABLE IF NOT EXISTS bundles (
+  id                INTEGER PRIMARY KEY,
+  root_id           INTEGER NOT NULL REFERENCES roots(id),
+  rel_path          TEXT    NOT NULL,
+  type              TEXT    NOT NULL
+    CHECK (type IN ('code_repo', 'code_project', 'course', 'album', 'photo_set', 'extracted_archive')),
+  parent_bundle_id  INTEGER REFERENCES bundles(id),
+  -- Which rule matched, recorded verbatim so a report can explain the bundle.
+  rule              TEXT    NOT NULL,
+  member_count      INTEGER,
+  total_size        INTEGER,
+  detected_scan     INTEGER REFERENCES scans(id),
+  UNIQUE (root_id, rel_path)
+);
+
 CREATE TABLE IF NOT EXISTS scan_errors (
   id        INTEGER PRIMARY KEY,
   scan_id   INTEGER NOT NULL REFERENCES scans(id),
@@ -78,4 +97,6 @@ CREATE INDEX IF NOT EXISTS items_by_sha   ON items (sha256);
 CREATE INDEX IF NOT EXISTS items_by_root_status ON items (root_id, status);
 CREATE INDEX IF NOT EXISTS items_by_seen  ON items (root_id, last_seen_scan);
 CREATE INDEX IF NOT EXISTS dirs_by_scan   ON dirs (root_id, last_seen_scan);
-CREATE INDEX IF NOT EXISTS errors_by_scan ON scan_errors (scan_id);
+CREATE INDEX IF NOT EXISTS errors_by_scan  ON scan_errors (scan_id);
+CREATE INDEX IF NOT EXISTS bundles_by_parent ON bundles (parent_bundle_id);
+CREATE INDEX IF NOT EXISTS bundles_by_scan  ON bundles (detected_scan);

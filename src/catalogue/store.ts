@@ -20,6 +20,11 @@ export interface ScanTotals {
   filesHashed: number;
   errors: number;
   symlinksSeen: number;
+  /**
+   * Bundle directories that stopped the walk. In-process only: like
+   * `symlinksSeen`, the `scans` table has no column for it (plan Task 3).
+   */
+  bundlesSeen: number;
 }
 
 export interface DirRow {
@@ -46,6 +51,26 @@ export interface ItemRow {
   nlink: number;
   status: ItemStatus;
   scanId: number;
+}
+
+export type BundleType =
+  | 'code_repo'
+  | 'code_project'
+  | 'course'
+  | 'album'
+  | 'photo_set'
+  | 'extracted_archive';
+
+export interface BundleRow {
+  rootId: number;
+  relPath: string;
+  type: BundleType;
+  parentBundleId: number | null;
+  rule: string;
+  /** Null for the walk-stopping types: their contents were never catalogued. */
+  memberCount: number | null;
+  totalSize: number | null;
+  detectedScan: number;
 }
 
 /** What an upsert has to know to decide whether hashes survive the scan. */
@@ -82,6 +107,14 @@ export interface CatalogueStore {
   setItemFullHash(rootId: number, relPath: string, sha256: string): void;
   /** Records how many distinct files this scan's hashing pass read. */
   setFilesHashed(scanId: number, filesHashed: number): void;
+  /** Inserts or updates one bundle, returning its id. */
+  upsertBundle(row: BundleRow): number;
+  /** Points a directory's items at their bundle, returning how many rows moved. */
+  setItemsBundle(dirId: number, bundleId: number): number;
+  /** Sets the directory's own bundle pointer. */
+  setDirBundle(dirId: number, bundleId: number): void;
+  /** Records that a bundle became a child of another bundle. */
+  setBundleParent(bundleId: number, parentBundleId: number): void;
   close(): void;
 }
 
@@ -248,6 +281,34 @@ export function openStore(dataDir: string): CatalogueStore {
 
     setFilesHashed(scanId, filesHashed) {
       db.prepare('UPDATE scans SET files_hashed = ? WHERE id = ?').run(filesHashed, scanId);
+    },
+
+    upsertBundle(row) {
+      db.prepare(
+        `INSERT INTO bundles (root_id, rel_path, type, parent_bundle_id, rule, member_count, total_size, detected_scan)
+         VALUES (@rootId, @relPath, @type, @parentBundleId, @rule, @memberCount, @totalSize, @detectedScan)
+         ON CONFLICT (root_id, rel_path) DO UPDATE SET
+           type = excluded.type, parent_bundle_id = excluded.parent_bundle_id, rule = excluded.rule,
+           member_count = excluded.member_count, total_size = excluded.total_size,
+           detected_scan = excluded.detected_scan`,
+      ).run(row);
+      const found = db
+        .prepare('SELECT id FROM bundles WHERE root_id = ? AND rel_path = ?')
+        .get(row.rootId, row.relPath) as { id: number } | undefined;
+      if (found === undefined) throw new Error(`bundle row vanished after insert: ${row.relPath}`);
+      return found.id;
+    },
+
+    setItemsBundle(dirId, bundleId) {
+      return db.prepare('UPDATE items SET bundle_id = ? WHERE dir_id = ?').run(bundleId, dirId).changes;
+    },
+
+    setDirBundle(dirId, bundleId) {
+      db.prepare('UPDATE dirs SET bundle_id = ? WHERE id = ?').run(bundleId, dirId);
+    },
+
+    setBundleParent(bundleId, parentBundleId) {
+      db.prepare('UPDATE bundles SET parent_bundle_id = ? WHERE id = ?').run(parentBundleId, bundleId);
     },
 
     close() {
