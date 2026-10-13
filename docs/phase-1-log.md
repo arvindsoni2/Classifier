@@ -482,3 +482,128 @@ was re-run properly and caught.
 - The checked-in JPEG is the only binary fixture in the catalogue tests; if it is
   ever regenerated it must keep its GPS tags, because the test asserts they do
   not appear in the catalogue.
+
+---
+
+## Task 5 — Reports and CLI
+
+**Commit:** `f07e5bf` — `feat(catalogue): reports and CLI`
+
+**Files:** `src/catalogue/report.ts`, `src/catalogue/report-format.ts`,
+`src/catalogue/report-summary.ts`, `src/catalogue/cli.ts`,
+`tests/catalogue/report.test.ts`, `tests/catalogue/cli.test.ts`, plus
+`src/catalogue/dedupe.ts` (optional scan scoping),
+`scripts/copy-assets.js` (schema.sql into dist) and `package.json` (the
+`catalogue` script).
+
+**Tests:** 20 new tests (11 report, 9 CLI). Full suite **284 passed** (264
+after Task 4 + 20 new). `pnpm typecheck`, `pnpm lint` and `pnpm test` all pass.
+
+The CLI tests run `node dist/catalogue/cli.js` as a child process and build
+`dist` in `beforeAll` (`tsc -p tsconfig.build.json` then `copy-assets.js`, about
+five seconds). That is deliberate: the plan asks for the built entry point, and
+it is the only thing that proves `schema.sql` reaches `dist` — without it the
+compiled store cannot open a database at all. No UI build is needed for it.
+
+Tests were written first and observed failing. Non-vacuousness was checked with
+ten deliberate breaks:
+
+| Mutation | Result |
+| --- | --- |
+| Largest-files cap removed | caught: `keeps only the largest files the plan asks for` |
+| Report directory loses its timestamp | caught: 4 tests |
+| CSV quoting disabled | caught: the bundles and escaping tests |
+| Report not scoped to one scan | caught: `reports only what that one scan saw` |
+| Bundles not scoped to the scan | caught: same test |
+| `--root` skips validation | caught: `an invalid --root is refused like an invalid configured root` |
+
+Four mutations appeared to survive at first, and all four turned out to be my own
+no-ops: a Python replacement written through two layers of shell escaping that
+did not match the source, so the code never changed and the tests correctly
+stayed green. They were re-run with the application printed and verified, and
+each then failed the test that owns the rule. Two of them did expose a genuine
+gap, now closed by the new tests: every earlier fixture reported a single scan,
+so nothing could tell a scoped report from an unscoped one.
+
+### Decisions and interpretations
+
+1. **Three modules, not one.** `report.ts` reads the catalogue and knows what the
+   rows mean, `report-format.ts` renders them with no I/O at all, and
+   `report-summary.ts` holds the shape both need. The first draft of `report.ts`
+   was 472 lines, over the ~400 ceiling in AGENTS.md rule 9, and the seam between
+   "what this row means" and "how to print it" is the natural one.
+2. **Every figure is scoped to the reported scan.** Items by `last_seen_scan`,
+   bundles by `detected_scan`, errors by `scan_id`, duplicates through a new
+   optional `scanId` on `duplicateGroups`. A report mixing in a stale row would
+   disagree with the filesystem at the moment it was read, which is the one thing
+   Arvind checks.
+3. **`stats` writes nothing.** It prints what a report would contain, through
+   `reportSummary`, without calling `writeReport`. An earlier draft had `stats`
+   write a report directory as a side effect of printing totals.
+4. **`scan` runs the whole pipeline**, not just the walk: hash, bundles, then
+   metadata. The plan's CLI has only three verbs, so the pipeline has to live
+   inside `scan`, and the figures it prints are then the ones the report holds.
+5. **Progress is read from the catalogue, not threaded through the scanner.**
+   Every five seconds the CLI asks for the running scan's item count, byte total
+   and most recent directory. That avoided changing the scanner's contract for a
+   cosmetic feature, and it is honest: those are rows the walk has really written.
+6. **Exit codes 0, 1, 2.** The plan only requires non-zero for a configuration or
+   database failure. A bad command line is separated as 2 so a script can tell
+   "your arguments are wrong" from "your configuration is wrong". A per-file
+   error is a count and never an exit code.
+7. **`--root` is re-validated, not trusted.** It goes back through
+   `validateConfig` with the configured `dataDir`, so the rule that the data
+   directory may never sit inside a root still applies to a flag. Pinned by a test
+   passing a missing path, a relative path and a file.
+8. **CSV quoting is minimal and correct.** A field is quoted only when it
+   contains a comma, a quote or a line break; quotes inside are doubled.
+   Non-ASCII is written as UTF-8, not escaped, and nothing is truncated — a name
+   is data. The test round-trips names containing a comma, quotes, a newline, and
+   Chinese and Japanese characters.
+9. **The report timestamp is UTC.** The scan id already makes the directory
+   unique; UTC means a report generated on two machines is comparable, which is
+   what makes review diffs meaningful.
+10. **`errors.csv` is one row per error**, not per code. The plan does not fix its
+    columns; the counts by code are in both summary forms, and the CSV is more
+    useful with the paths.
+
+### Changed outside the task's file list
+
+- `src/catalogue/dedupe.ts` — `duplicateGroups` takes an optional scan id. The
+  report needs scan-scoped groups, and duplicating that SQL in `report.ts` would
+  have been worse than one optional parameter on the function that owns the query.
+- `scripts/copy-assets.js` and `package.json` — the plan's "build inclusion". The
+  Task 1 entry flagged that `schema.sql` was not yet copied into `dist` and that
+  `pnpm catalogue scan` must not be wired before this task; this is that task.
+
+### Deferred, with reasons
+
+1. **The five-second progress cadence is not observed firing.** A fixture scan
+   finishes in milliseconds. What a progress line must contain is tested
+   directly through `formatProgressLine`; the interval itself is not, and the
+   first real scan is the first thing to exercise it.
+2. **A large report holds its groups in memory.** `duplicateGroups` materialises
+   every group for the requested scan and the summary keeps the largest 30. Fine
+   for a Downloads-folder catalogue, which is what Phase 1 targets; worth
+   revisiting if a root holds millions of items.
+3. **No report section carries metadata figures.** The plan does not ask for them,
+   and Task 6 hands `summary.md` and `summary.json` to review — where per-extractor
+   counts would be the obvious next question. Recorded rather than added.
+4. **A report of a failed scan still reports it.** `latestFinishedScan` includes
+   `failed` scans, and `--scan <id>` reports whatever rows exist. A failed scan
+   still saw files; hiding them would make the report disagree with the disk.
+5. **The CLI tests rebuild `dist` every run** (~5s). Caching on a source timestamp
+   would be faster but would let a stale `dist` produce a confusing failure, and
+   the honest cost seemed better for a suite that runs before a review.
+
+### Notes for the next session
+
+- `pnpm build` then `pnpm catalogue scan` is the acceptance path in Task 6. The
+  build must include `copy-assets.js` or the store cannot find its schema.
+- `reportSummary(store, scanId)` and `writeReport(store, scanId, dataDir)` are the
+  two entry points; `listBundles`, `duplicateGroups` and `metadataRows` cover the
+  rest if a future report needs finer slices.
+- Exit codes are 0/1/2 as above; a review script can rely on 1 meaning
+  "configuration or database" and nothing else.
+- The scan summary line is stable enough to grep:
+  `Scan <id> of <n> root(s) finished.`
