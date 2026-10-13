@@ -607,3 +607,34 @@ so nothing could tell a scoped report from an unscoped one.
   "configuration or database" and nothing else.
 - The scan summary line is stable enough to grep:
   `Scan <id> of <n> root(s) finished.`
+
+---
+
+## Review follow-up — Task 1 symlink test
+
+**Commit:** `ee91600` — `test(catalogue): make the symlink test follow a real
+outside directory`
+
+A Task 1 review blocker, fixed on its own. The `escape` symlink pointed at a
+directory that was never created, so it was dangling: a scanner that followed it
+would have found nothing to catalog and the test would still have passed. The
+reviewer's point stands — the test could not detect the behaviour it names.
+
+The fix creates `outside/` with a `secret.txt` in it before linking, and asserts
+that no catalogued `rel_path` starts with `escape/` and that `secret.txt` appears
+nowhere in the catalogue. The existing file-symlink assertions and
+`symlinksSeen === 2` are unchanged.
+
+Proven by mutation: `listDirectory` was temporarily changed to treat a symlink to
+a directory as a directory, and the test then failed on `escape/secret.txt` with
+the `symlinksSeen` assertion still passing — so the new assertion, not the older
+one, is what detects it. A first mutation attempt also catalogued file symlinks
+and tripped the older assertion first; it was narrowed so the failure pointed at
+the directory case specifically. The mutation was reverted and is not in the
+commit.
+
+**Tests:** 284 pass, unchanged in number. `pnpm typecheck`, `pnpm lint` and
+`pnpm test` all pass. Only `tests/catalogue/scanner.test.ts` was touched.
+
+The review's "should fix" items were left alone as instructed, and no other task
+was started.
