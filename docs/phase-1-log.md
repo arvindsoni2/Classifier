@@ -816,3 +816,111 @@ checks still hold against the new layout.
 ### Still open
 
 The Phase 1 review's nine "should fix" items are untouched.
+---
+
+## Task 1b — Filesystem-aware volume handling
+
+Plan Task 1, second session (the plan splits it; spec D31). One commit:
+`feat(catalogue): filesystem-aware volume handling`.
+
+**Tests:** 322 pass (303 after 1a, +19). `pnpm typecheck`, `pnpm lint` and
+`pnpm test` all pass. Thirteen mutations, each caught by the test that owns the
+rule.
+
+### What this session does
+
+`volume.ts` asks `findmnt --json --output UUID,LABEL,FSTYPE,TARGET --target
+<path>` — argument array, no shell, 5s deadline — and turns the answer into one
+decision per root (`decideRoot`), all of it a pure function so every case runs on
+a machine with no drive attached:
+
+| Decision | Detected by | Effect |
+| --- | --- | --- |
+| offline | the path is gone, or a recorded mount point is no longer one | root skipped, **no item touched** |
+| retired | the recorded volume identity differs from the current one | old items retired with their hashes, `VOLUME_CHANGED` recorded, root scanned as new |
+| scan | same volume | ordinary incremental scan |
+
+Volume identity is the uuid where both sides have one, the filesystem type where
+neither does (vfat has no uuid at all), and a difference in either is a new
+volume. The CLI now passes `defaultVolumeProbe`, so `catalogue scan` is
+volume-aware, and reports how many roots were offline.
+
+Change detection follows the root's filesystem (`identity.ts`):
+
+- **inode** filesystems — inode + size + mtime. A renamed file keeps them, so its
+  hashes travel with it and a 40 GB film is not re-hashed for a new name.
+- **path** filesystems (vfat, exfat, ntfs) — size + mtime at two-second precision,
+  because inodes are synthetic there and FAT stores times that coarsely.
+
+`dev` is in neither, for the reason Task 1a found.
+
+### Two consequences that were not in the plan's test list
+
+1. **Duplicate copy-counting had to follow the identity mode** (`dedupe.ts`).
+   Copies were counted as `DISTINCT dev:ino`, which collapses hard links. On
+   exFAT every file can share a synthetic inode, so every duplicate group on an
+   external drive would have counted as one copy and disappeared from the report —
+   the one place duplicates matter most. Path-mode roots now count by path, and
+   `does not collapse distinct files that share an inode number` pins it, with
+   the inode-mode mirror (`still collapses hard links`) so the rule cannot be
+   satisfied by ignoring inodes everywhere.
+2. **An index on `(root_id, ino)`** in `schema.sql`, because the rename
+   carry-over looks a file up by inode, and without it that lookup would scan
+   every item in the root once per newly seen item.
+
+### Decisions and interpretations
+
+1. **"inode_mode_detects_rename_as_same_file … keeps its hashes" is implemented
+   as hash carry-over.** The table is keyed by `(root_id, rel_path)`, so a rename
+   would otherwise be an insert plus a retirement, and the file would be re-hashed
+   on the next pass — the plan's own words say it keeps them. The carry-over only
+   fires in inode mode, and `path mode does not carry a hash across a rename` pins
+   that.
+2. **A root with no recorded filesystem type is scanned, never retired.** That is
+   the migration case: after the Task 1a `ALTER TABLE` every existing root has
+   null volume facts, and retiring on the first volume-aware scan would mark a
+   whole machine's catalogue missing. Its own test says so.
+3. **Going offline keeps the volume facts**, including `last_online_at`: the last
+   time the drive was actually readable is exactly when "is a different drive at
+   this path?" can next be answered.
+4. **Retiring a volume clears hashes and extracted metadata**, because those
+   describe bytes that are no longer at that path.
+5. **Retirement is recorded as one `VOLUME_CHANGED` error for the root**, not one
+   per file: 40,000 retired files are one event, and `scan_errors` should not
+   grow by 40,000 rows.
+6. **The path-mode tests drive the store**, not a fake stat. The comparison lives
+   in `upsertItems`, and the inode numbers, timestamps and renames these rules turn
+   on cannot be produced by a fixture.
+
+### Checked against the real catalogue
+
+The Task 1a migration was verified on a **copy** of the live database: the eight
+columns were added, and all 23,323 items, 3 scans and both roots survived
+untouched. The real file was not opened for writing. Those roots have null volume
+facts, so the next scan records them and, by decision 2, retires nothing.
+
+### Changed outside the task's file list
+
+| File | Concern | Why |
+| --- | --- | --- |
+| `src/catalogue/identity.ts` | what counts as the same file, per filesystem | a pure rule with no SQL, testable without a fixture |
+| `tests/catalogue/volume-world.ts` | the two-root (laptop + drive) test world | shared by both 1b test files; a probe that answers per path, so "this drive changed" cannot be confused with "this disk changed" |
+| `tests/catalogue/identity.test.ts` | the identity-mode cases | `volume.test.ts` reached 517 lines, past the rule 9 ceiling |
+| `tests/fixtures/findmnt-samples.ts` | checked-in `findmnt --json` output | the plan asks for samples; these are real output, including the `null` fields a hand-written sample would tidy away |
+
+### Known, not fixed
+
+- **The report still does not show volumes.** `scan_roots` holds what a scan
+  covered and which drives were offline, but Task 5's `summary.md` does not read
+  it. That is a report change, in Task 5's files, and not this task's.
+- **Test files are over the 400-line ceiling**: `bundles.test.ts` 553,
+  `scanner.test.ts` 527, `report.test.ts` 432, `metadata.test.ts` 425. These are
+  pre-existing patterns rather than new ones; `scanner.test.ts` grew in 1a. Worth a
+  splitting pass, but not inside a task about volumes.
+- **No real drive has been plugged in yet**, so the unmounted-mount-point and
+  reformat paths are proven by injected probes and checked-in `findmnt` output
+  only. The first real proof will be a drive going in and coming out.
+
+### Still open
+
+The Phase 1 review's nine "should fix" items are still untouched.

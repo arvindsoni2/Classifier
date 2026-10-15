@@ -9,6 +9,7 @@
 import Database from 'better-sqlite3';
 import { chmodSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { isUnchanged, type IdentityMode } from './identity.js';
 import { migrateSchema } from './migrate.js';
 import type { CatalogueStore, ItemRow } from './store-types.js';
 import {
@@ -38,7 +39,6 @@ export type {
 
 /** What an upsert has to know to decide whether hashes survive the scan. */
 interface ExistingItem {
-  dev: string;
   ino: string;
   size: number;
   mtimeNs: string;
@@ -111,6 +111,22 @@ export function openStore(dataDir: string): CatalogueStore {
   const markMissing = db.prepare(
     `UPDATE items SET status = 'missing' WHERE root_id = ? AND status <> 'missing' AND last_seen_scan <> ?`,
   );
+  const selectRootVolume = db.prepare(
+    'SELECT volume_uuid AS volumeUuid, fstype, is_mount_point AS isMountPoint FROM roots WHERE path = ?',
+  );
+  const selectIdentityMode = db.prepare('SELECT identity_mode AS identityMode FROM roots WHERE id = ?');
+  // The identity of a file that moved: same inode, size and mtime, a different
+  // path, and hashes already recorded. Only inode-mode roots look here, and
+  // items_by_identity keeps it a lookup rather than a scan.
+  const selectMovedHashes = db.prepare(
+    `SELECT id, partial_hash AS partialHash, sha256 FROM items
+     WHERE root_id = @rootId AND ino = @ino AND size = @size AND mtime_ns = @mtimeNs
+       AND rel_path <> @relPath AND (sha256 IS NOT NULL OR partial_hash IS NOT NULL)
+     ORDER BY last_seen_scan DESC LIMIT 1`,
+  );
+  const applyHashes = db.prepare(
+    'UPDATE items SET partial_hash = @partialHash, sha256 = @sha256 WHERE id = @id',
+  );
   const insertError = db.prepare(
     'INSERT INTO scan_errors (scan_id, root_id, rel_path, code, message) VALUES (@scanId, @rootId, @relPath, @code, @message)',
   );
@@ -166,6 +182,35 @@ export function openStore(dataDir: string): CatalogueStore {
       });
     },
 
+    rootVolumeByPath(rootPath) {
+      return (selectRootVolume.get(rootPath) as
+        | { volumeUuid: string | null; fstype: string | null; isMountPoint: number | null }
+        | undefined) ?? null;
+    },
+
+    markRootOffline(rootId) {
+      // Only the status changes. The volume facts stay, and `last_online_at`
+      // keeps pointing at the last time this drive was actually readable: that
+      // is when the question "is a different drive at this path?" can next be
+      // answered.
+      db.prepare("UPDATE roots SET status = 'offline' WHERE id = ?").run(rootId);
+    },
+
+    retireRootItems(rootId) {
+      return db.transaction(() => {
+        db.prepare(
+          `DELETE FROM metadata WHERE item_id IN
+             (SELECT id FROM items WHERE root_id = ? AND status = 'present')`,
+        ).run(rootId);
+        return db
+          .prepare(
+            `UPDATE items SET status = 'missing', partial_hash = NULL, sha256 = NULL, bundle_id = NULL
+             WHERE root_id = ? AND status = 'present'`,
+          )
+          .run(rootId).changes;
+      })();
+    },
+
     recordScanRoot(row) {
       db.prepare(
         `INSERT INTO scan_roots (scan_id, root_id, path, status, fstype)
@@ -185,22 +230,50 @@ export function openStore(dataDir: string): CatalogueStore {
     },
 
     upsertItems(rows) {
+      // Identity mode is a property of the root's volume, so it is read once per
+      // root per batch rather than per row.
+      const modes = new Map<number, IdentityMode>();
+      const modeOf = (rootId: number): IdentityMode => {
+        const cached = modes.get(rootId);
+        if (cached !== undefined) return cached;
+        const row = selectIdentityMode.get(rootId) as { identityMode: string | null } | undefined;
+        // No recorded mode means a root catalogued before volumes existed:
+        // inode identity is the behaviour every root had.
+        const mode: IdentityMode = row?.identityMode === 'path' ? 'path' : 'inode';
+        modes.set(rootId, mode);
+        return mode;
+      };
       const write = db.transaction((batch: ItemRow[]) => {
         for (const row of batch) {
+          const mode = modeOf(row.rootId);
           const existing = selectItem.get(row.rootId, row.relPath) as ExistingItem | undefined;
           if (existing === undefined) {
             insertItem.run(row);
+            // A file that was renamed is not a new file: on an inode filesystem
+            // its identity travels with it, so its hashes travel too rather than
+            // the next pass re-reading a file the catalogue already knows.
+            if (mode === 'inode') {
+              const moved = selectMovedHashes.get({
+                rootId: row.rootId,
+                ino: row.ino,
+                size: row.size,
+                mtimeNs: row.mtimeNs,
+                relPath: row.relPath,
+              }) as { id: number; partialHash: string | null; sha256: string | null } | undefined;
+              if (moved !== undefined) {
+                const inserted = db
+                  .prepare('SELECT id FROM items WHERE root_id = ? AND rel_path = ?')
+                  .get(row.rootId, row.relPath) as { id: number };
+                applyHashes.run({
+                  id: inserted.id,
+                  partialHash: moved.partialHash,
+                  sha256: moved.sha256,
+                });
+              }
+            }
             continue;
           }
-          const unchanged =
-            // `dev` is deliberately absent: a USB drive gets a new device
-            // number every time it is plugged in, so comparing it across scans
-            // would re-hash a whole external volume on every run. Within one
-            // scan the scanner still compares it, to detect a mount boundary.
-            existing.ino === row.ino &&
-            existing.size === row.size &&
-            existing.mtimeNs === row.mtimeNs;
-          if (unchanged) {
+          if (isUnchanged(mode, { ...existing, relPath: row.relPath, size: existing.size, mtimeNs: existing.mtimeNs }, row)) {
             // Hashes (and, from Task 4, extracted metadata) survive untouched.
             keepItem.run({ id: existing.id, dirId: row.dirId, status: row.status, scanId: row.scanId });
             continue;

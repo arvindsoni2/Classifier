@@ -139,6 +139,9 @@ CREATE INDEX IF NOT EXISTS items_by_size  ON items (size);
 CREATE INDEX IF NOT EXISTS items_by_sha   ON items (sha256);
 CREATE INDEX IF NOT EXISTS items_by_root_status ON items (root_id, status);
 CREATE INDEX IF NOT EXISTS items_by_seen  ON items (root_id, last_seen_scan);
+-- Only inode-mode roots look a file up by inode, to find one that moved; without
+-- this index that lookup would scan every item in the root, once per new item.
+CREATE INDEX IF NOT EXISTS items_by_identity ON items (root_id, ino);
 CREATE INDEX IF NOT EXISTS dirs_by_scan   ON dirs (root_id, last_seen_scan);
 CREATE INDEX IF NOT EXISTS errors_by_scan  ON scan_errors (scan_id);
 CREATE INDEX IF NOT EXISTS metadata_by_status ON metadata (extractor, status);

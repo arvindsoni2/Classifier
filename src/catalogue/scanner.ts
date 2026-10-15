@@ -18,6 +18,7 @@ import { join } from 'node:path';
 import { type CatalogueConfig } from './config.js';
 import { detectKind, extensionOf, MAGIC_PREFIX_BYTES } from './kinds.js';
 import { listDirectory, type Listing } from './list-directory.js';
+import { decideRoot, identityModeFor, type KnownRoot, type VolumeProbe } from './volume.js';
 import type { CatalogueStore, DirRow, ItemRow, ItemStatus, ScanTotals } from './store.js';
 
 export interface ScanResult {
@@ -30,36 +31,6 @@ export interface ScanResult {
   rootsOffline: number;
   totals: ScanTotals;
   elapsedMs: number;
-}
-
-/**
- * What a probe found about the filesystem a path sits on.
- *
- * `uuid` is null for filesystems that have none (vfat, and some FUSE mounts) —
- * which is exactly why it cannot be the only identity signal.
- */
-export interface VolumeInfo {
-  uuid: string | null;
-  label: string | null;
-  fstype: string;
-  mountPoint: string;
-}
-
-/**
- * Reports the filesystem at `path`, or null when the path does not exist.
- *
- * Task 1a only defines the seam and records what it is told; the real probe
- * (findmnt) and the offline / volume-changed / path-mode decisions belong to
- * Task 1b, so a scan without a probe behaves exactly as it did before.
- */
-export type VolumeProbe = (path: string) => Promise<VolumeInfo | null>;
-
-/** Filesystems where an inode number identifies a file across scans. */
-const INODE_IDENTITY_FS: ReadonlySet<string> = new Set(['ext4', 'xfs', 'btrfs', 'f2fs', 'ext3', 'ext2']);
-
-/** Inode|path: the only thing a filesystem type decides here. */
-export function identityModeFor(fstype: string): 'inode' | 'path' {
-  return INODE_IDENTITY_FS.has(fstype) ? 'inode' : 'path';
 }
 
 /** One directory as the scanner sees it, handed to `onDirectory`. */
@@ -79,9 +50,30 @@ export interface ScanDirectoryContext {
  * may return `false` to stop the scanner descending — how Task 3 stops at a
  * bundle boundary. `volumeProbe` is asked once per root.
  */
+// The volume types live in `volume.ts` (Task 1b) and are re-exported here
+// because the scanner is what consumes them.
+export type { VolumeInfo, VolumeProbe } from './volume.js';
+
 export interface ScanHooks {
   onDirectory?: (dir: ScanDirectoryContext) => boolean | void;
   volumeProbe?: VolumeProbe;
+}
+
+/** The volume facts a previous scan recorded for a root, if it has any. */
+function knownVolume(store: CatalogueStore, rootPath: string): KnownRoot | null {
+  const known = store.rootVolumeByPath(rootPath);
+  if (known === null) return null;
+  return {
+    volumeUuid: known.volumeUuid,
+    fstype: known.fstype,
+    // SQLite has no boolean; 1 is how a true is stored.
+    isMountPoint: known.isMountPoint === null ? null : known.isMountPoint === 1,
+  };
+}
+
+/** How a volume is named in a message: its uuid when it has one, else its type. */
+function describeVolume(uuid: string | null, fstype: string | null): string {
+  return uuid ?? fstype ?? 'unknown';
 }
 
 interface PendingDir {
@@ -139,24 +131,23 @@ async function scanRoot(
   hooks: ScanHooks,
 ): Promise<'online' | 'offline'> {
   const startedAt = new Date().toISOString();
-  const volume = hooks.volumeProbe === undefined ? null : await hooks.volumeProbe(rootPath);
 
-  // Offline: the root is not there. It is recorded and skipped without touching a
-  // single item — an absent drive is not a deleted directory, and marking its
-  // files missing would be the most destructive thing this scan could do.
-  if (hooks.volumeProbe !== undefined && volume === null) {
+  // Without a probe nothing is known about the volume, and the scan behaves
+  // exactly as it did before volumes existed: every root is walked, nothing is
+  // retired. The CLI supplies the real probe (Task 1b); tests supply a fake.
+  const decision =
+    hooks.volumeProbe === undefined
+      ? null
+      : decideRoot(rootPath, await hooks.volumeProbe(rootPath), knownVolume(store, rootPath));
+
+  // Offline: the drive is not there, or its mount point has gone. It is recorded
+  // and skipped without touching a single item — an absent drive is not a
+  // deleted directory, and retiring its files would be the most destructive
+  // thing this scan could do. Its volume facts are kept, so a different drive
+  // turned up at the same path is still recognised as a different volume.
+  if (decision?.kind === 'offline') {
     const offlineId = store.upsertRoot(rootPath, '0', '0', startedAt, scanId);
-    store.setRootVolume(offlineId, {
-      status: 'offline',
-      volumeUuid: null,
-      volumeLabel: null,
-      fstype: null,
-      mountPoint: null,
-      isMountPoint: null,
-      identityMode: null,
-      // Deliberately unchanged: the last time this drive was actually readable.
-      lastOnlineAt: null,
-    });
+    store.markRootOffline(offlineId);
     store.recordScanRoot({ scanId, rootId: offlineId, path: rootPath, status: 'offline', fstype: null });
     store.setRootLastScan(offlineId, scanId);
     return 'offline';
@@ -173,7 +164,28 @@ async function scanRoot(
     startedAt,
     scanId,
   );
+
+  const volume = decision?.kind === 'scan' || decision?.kind === 'retired' ? decision.current : null;
   if (volume !== null) {
+    if (decision?.kind === 'retired') {
+      // A different volume is at this path: the drive was reformatted, or
+      // another one was plugged in. Everything the old volume held is retired
+      // with its hashes, because none of it can be trusted to still hash to
+      // what was recorded, and the change is on the record for the root.
+      const retired = store.retireRootItems(rootId);
+      store.addErrors([
+        {
+          scanId,
+          rootId,
+          relPath: rootPath,
+          code: 'VOLUME_CHANGED',
+          message:
+            `volume changed at this path: ${describeVolume(decision.previousUuid, decision.previousFstype)}` +
+            ` became ${describeVolume(volume.uuid, volume.fstype)}; ${retired} item(s) retired`,
+        },
+      ]);
+      totals.errors += 1;
+    }
     store.setRootVolume(rootId, {
       status: 'online',
       volumeUuid: volume.uuid,

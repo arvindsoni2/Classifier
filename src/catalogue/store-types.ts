@@ -111,13 +111,25 @@ export interface CatalogueStore {
   setRootVolume(rootId: number, volume: RootVolume): void;
   /** Records that a scan covered this root, and whether it was online. */
   recordScanRoot(row: { scanId: number; rootId: number; path: string; status: 'online' | 'offline'; fstype: string | null }): void;
+  /** What previous scans recorded about a root's volume, or null for a new one. */
+  rootVolumeByPath(path: string): { volumeUuid: string | null; fstype: string | null; isMountPoint: number | null } | null;
+  /** Marks a root offline, keeping its volume facts and `last_online_at`. */
+  markRootOffline(rootId: number): void;
+  /**
+   * Retires every present item of a root whose volume changed, hashes and
+   * extracted metadata included: none of it can be trusted to describe the bytes
+   * now at that path. Rows are marked missing, never deleted.
+   */
+  retireRootItems(rootId: number): number;
   setRootLastScan(rootId: number, scanId: number): void;
   /** Inserts or updates one directory, returning its id. */
   upsertDir(row: DirRow): number;
   /**
-   * Inserts or updates files. An item whose `(dev, ino, size, mtime_ns)` is
-   * unchanged keeps its hashes; anything else invalidates them, because a
-   * changed file can no longer be trusted to hash to its recorded value.
+   * Inserts or updates files. What counts as unchanged depends on the root's
+   * recorded identity mode (see `identity.ts`): an unchanged file keeps its
+   * hashes, and a file that moved within an inode-mode root keeps them too.
+   * Anything else invalidates them, because changed bytes can no longer be
+   * trusted to hash to what was recorded.
    */
   upsertItems(rows: ItemRow[]): void;
   /** Rows are never deleted: present items this scan did not see become missing. */

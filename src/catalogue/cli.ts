@@ -21,6 +21,7 @@
 import { bundleScanHook, detectBundles } from './bundles.js';
 import { loadConfig, validateConfig, ConfigError, type CatalogueConfig } from './config.js';
 import { computeHashes } from './dedupe.js';
+import { defaultVolumeProbe } from './volume.js';
 import { extractMetadata } from './metadata/index.js';
 import { latestFinishedScan, reportSummary, writeReport } from './report.js';
 import { scan } from './scanner.js';
@@ -180,7 +181,12 @@ async function runScan(config: CatalogueConfig): Promise<number> {
     progress.unref?.();
 
     const startedAt = Date.now();
-    const result = await scan(config, store, { onDirectory: bundleScanHook(store) });
+    // The real probe: a root on an unplugged drive is reported offline and left
+    // alone, and a drive replaced by another is recognised as a different volume.
+    const result = await scan(config, store, {
+      onDirectory: bundleScanHook(store),
+      volumeProbe: defaultVolumeProbe,
+    });
     const hashes = await computeHashes(store, result.scanId);
     const bundles = detectBundles(store, result.scanId);
     const metadata = await extractMetadata(store, result.scanId);
@@ -191,6 +197,9 @@ async function runScan(config: CatalogueConfig): Promise<number> {
       [
         `Scan ${result.scanId} of ${result.roots} root(s) finished.`,
         `Roots: ${config.roots.join(', ')}`,
+        ...(result.rootsOffline > 0
+          ? [`Offline (not present, nothing changed): ${result.rootsOffline} root(s).`]
+          : []),
         `${result.totals.filesSeen} files in ${result.totals.dirsSeen} directories, ` +
           `${formatBytes(result.totals.bytesSeen)}, ${result.totals.errors} errors.`,
         `Hashed ${hashes.filesHashed} file(s); ${bundles.length} bundle(s); ` +

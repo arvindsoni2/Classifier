@@ -10,8 +10,14 @@
  *      item has no full hash yet.
  *
  * Unchanged items keep their hashes (Task 1 rule 9 clears them on change), so
- * a rescan of an unchanged tree reads nothing. Hard links — same device and
- * inode — are one copy, never a duplicate.
+ * a rescan of an unchanged tree reads nothing.
+ *
+ * What counts as *one copy* depends on the root's filesystem (Task 1b). On an
+ * inode filesystem two paths with the same inode are the same file — a hard link
+ * — and never a duplicate. On vfat, exfat and ntfs the inode numbers are
+ * synthetic and change between mounts, so inode says nothing: there each path is
+ * its own copy. Counting by inode everywhere would make every duplicate group on
+ * an external drive vanish from the report, which is the one place they matter.
  *
  * This module owns the dedupe policy and its read queries; writes go through
  * the store's methods. Candidate rows are materialised per stage (bounded by
@@ -34,7 +40,11 @@ export interface DuplicateItem {
 export interface DuplicateGroup {
   sha256: string;
   size: number;
-  /** Distinct files (device + inode) holding these bytes. */
+  /**
+   * Distinct files holding these bytes. On an inode-mode root, hard links are
+   * one copy; on a path-mode root every path is its own copy, because inodes
+   * there are synthetic and cannot tell two files apart.
+   */
   copies: number;
   /** (copies − 1) × size. */
   wastedBytes: number;
@@ -205,10 +215,16 @@ export function duplicateGroups(store: CatalogueStore, scanId?: number): Duplica
   // must not be handed a named parameter its SQL never mentions, and the
   // members query already carries a positional one.
   const scoped = scanId === undefined ? '' : ' AND i.last_seen_scan = @scanId';
+  // One expression for "which file is this", chosen per row by the root's
+  // identity mode: inode and device where inodes are real, root and path where
+  // they are synthetic.
   const headsSql = (clause: string): string =>
-    `SELECT sha256, size, COUNT(DISTINCT dev || ':' || ino) AS copies
-     FROM items i
-     WHERE status = 'present' AND sha256 IS NOT NULL${clause}
+    `SELECT sha256, size,
+            COUNT(DISTINCT CASE WHEN r.identity_mode = 'path'
+                                THEN i.root_id || ':' || i.rel_path
+                                ELSE i.dev || ':' || i.ino END) AS copies
+     FROM items i JOIN roots r ON r.id = i.root_id
+     WHERE i.status = 'present' AND i.sha256 IS NOT NULL${clause}
      GROUP BY sha256, size
      HAVING copies >= 2
      ORDER BY (copies - 1) * size DESC, sha256 ASC`;

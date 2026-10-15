@@ -168,18 +168,21 @@ describe('catalogue CLI (Phase 1 Task 5)', () => {
 
   it('an invalid --root is refused like an invalid configured root', () => {
   const { fixture, configPath } = buildWorld('cli-bad-root-flag');
-  const missing = join(fixture.parent, 'no-such-root');
   const before = snapshot(fixture.root);
 
-  for (const bad of [missing, 'relative/path']) {
+  // A path that is not absolute is refused, and a file where a directory was
+  // asked for is refused. A root that does not exist is *not* refused: that is an
+  // unplugged drive, and the scan reports it as offline.
+  for (const bad of ['relative/path', join(fixture.root, 'notes', '01 one.txt')]) {
     const result = runCli(['scan', '--config', configPath, '--root', bad]);
     expect(result.code).not.toBe(0);
     expect(result.stderr).toMatch(/root/i);
     expect(result.stderr).not.toMatch(/at .*\.js:\d+/);
   }
-  // A file where a directory was asked for is refused too.
-  const asFile = runCli(['scan', '--config', configPath, '--root', join(fixture.root, 'notes', '01 one.txt')]);
-  expect(asFile.code).not.toBe(0);
+  const missingRoot = join(fixture.parent, 'no-such-root');
+  const unplugged = runCli(['scan', '--config', configPath, '--root', missingRoot]);
+  expect(unplugged.code).toBe(0);
+  expect(unplugged.stdout).toMatch(/Offline .* 1 root/);
   expect(snapshot(fixture.root)).toEqual(before);
 }, 120_000);
 
