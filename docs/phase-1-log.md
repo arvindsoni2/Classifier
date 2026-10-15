@@ -1017,3 +1017,78 @@ The review's should-fix items 1–4 and 6–8 are untouched, as agreed; item 5 w
 the stale hashes, corrected above because this task asked for it. Two of the
 untouched ones will show on the next real run: the 87 metadata failures under
 "0 errors", and historical reports losing their bundles after a rescan.
+
+---
+
+## Task 6 — Real-data acceptance (Arvind's roots, agent-run on 2026-10-15)
+
+Five scans of the two real roots, `/home/asoni/Downloads` and `/home/asoni/Documents`,
+both on `btrfs`. No code changed for this entry; it records what the catalogue
+actually found.
+
+**Step 6 of the plan (the drive) was not run:** no external drive was attached, so
+`lsblk` showed only the laptop's own `nvme0n1`. The offline, unmounted-mount-point
+and volume-changed paths therefore remain unproven on real hardware — they are
+exercised only by injected probes in `volume.test.ts`. That gap is recorded, not
+closed.
+
+### The five scans
+
+| Scan | Files | Bytes | Hashed | Elapsed |
+| --- | --- | --- | --- | --- |
+| 1 | 23,323 | 84,748,232,269 | 15,418 | 5.83s |
+| 2 | 23,323 | 84,748,232,269 | 0 | 2.87s |
+| 3 | 4,036 | 83,878,844,155 | 0 | 0.70s |
+| 4 | 4,036 | 83,878,844,299 | 0 | 0.66s |
+| 5 | 4,036 | 83,878,844,299 | 0 | 0.77s |
+
+Scans 1 and 2 are the incrementality proof: the second run rehashed nothing and
+finished in half the time. Scan 3 dropped 19,287 files for 869,388,114 bytes —
+exactly the virtualenv items the blocker fix stopped cataloguing, all small, so
+the byte total barely moved. Scans 3 to 5 differ by 144 bytes, which is two files
+other programs rewrote, not the catalogue.
+
+Scan 5 is the read-only proof. With a marker touched immediately before it:
+
+```
+touch /tmp/before-scan && pnpm catalogue scan
+find /home/asoni/Downloads /home/asoni/Documents -newer /tmp/before-scan -not -path '*/.*'
+```
+
+**0 files.** A full scan of 4,036 files and 83.9 GB wrote nothing inside either
+root. This is the Phase 1 guarantee (AGENTS.md rule 4) on real data, not fixtures.
+
+### The earlier blockers, confirmed on real data
+
+| Blocker | Before | Now |
+| --- | --- | --- |
+| `AWS SAA _C03/code_v2025-10-27` | 0 members, 23 files below it | `extracted_archive`, 23 members |
+| `Geekforgeeks GenAI course` | 20/20 videos, no marker | `course`, 73 members, `>=3 videos, >=60% with a sequence marker` |
+| virtualenvs | 19,287 items catalogued | skipped by `pyvenv.cfg` |
+
+The volume work shows correctly on both roots: `stats` prints
+`(online, btrfs)` per root, and `scan_roots` records both for every scan.
+
+### What the catalogue found
+
+40 bundles, 536 duplicate groups, 3,625,201,226 bytes wasted — against 83.9 GB
+catalogued. The largest single duplicate group is a 1.3 GB course video that exists
+twice under two names.
+
+### Two things that read worse than they are
+
+1. **`metadata ok for 0 of 2370` is not a failure.** `ok` counts extractions
+   performed *this run*; on a rescan every item/extractor pair is already settled,
+   so nothing re-runs. The stored state is 2,283 `ok` and 87 `failed`
+   (`pdfinfo` 39, `exif` 38, `epub` 5, `office` 5). The wording is misleading and
+   is worth changing; it was not changed here because it is not a blocker.
+2. **The first marker was stale.** The marker used for the original
+   read-only check was four hours old, so `find` listed 209 entries: 206 of them
+   this project's own commits and 3 another application's SQLite WAL. The
+   isolated single-scan check above is the one that counts.
+
+### Still open
+
+The review's should-fix items are untouched. Two are visible above rather than
+fixed: the 87 metadata failures appear nowhere in the report (`0 errors`, empty
+`errors.csv`), and `metadata ok for 0 of 2370` hides them from the console too.
