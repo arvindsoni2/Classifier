@@ -145,7 +145,72 @@ describe('bundle detection (Phase 1 Task 3)', () => {
     expect(found[0]?.memberCount).toBe(3);
   });
 
-  it('two numbered videos are not a course', async () => {
+  it('a trailing number can mark a course video', async () => {
+    const fixture = makeFixture('course-trailing-number');
+    // Arvind's largest course: 20 videos named `Extra 1.mp4` … `Extra13.mp4`,
+    // none of which starts with a number or a keyword. ~50 GB left loose.
+    fixture.put('genai course/Extra_1.mp4', 'video bytes\n');
+    fixture.put('genai course/Extra 2.mp4', 'video bytes\n');
+    fixture.put('genai course/Extra13.mp4', 'video bytes\n');
+    fixture.put('genai course/Extra 9#.mp4', 'video bytes\n');
+    const { store } = await scanFixture(fixture);
+
+    const found = listBundles(store);
+    expect(found).toHaveLength(1);
+    expect(found[0]?.type).toBe('course');
+    expect(found[0]?.relPath).toBe('genai course');
+    expect(found[0]?.memberCount).toBe(4);
+  });
+
+it('camera and date-stamped names are not sequence markers', async () => {
+    const fixture = makeFixture('course-trailing-number-negative');
+    // Timestamps, in their own directory: digits, but a run preceded by a digit.
+    fixture.put('clips/VID_20240101_120000.mp4', 'video bytes\n');
+    fixture.put('clips/VID_20240101_130000.mp4', 'video bytes\n');
+    fixture.put('clips/VID_20240102_090000.mp4', 'video bytes\n');
+    // Four-digit counters, in their own directory: this is what pins the digit
+    // ceiling at three. Were it four, all three would be marked and this folder
+    // would become a course.
+    fixture.put('camera/clip_1234.mp4', 'video bytes\n');
+    fixture.put('camera/clip_2345.mp4', 'video bytes\n');
+    fixture.put('camera/clip_3456.mp4', 'video bytes\n');
+    const { store } = await scanFixture(fixture);
+
+    expect(listBundles(store)).toEqual([]);
+  });
+
+it('subdirectory names need a leading number or a keyword, not a trailing one', async () => {
+    const fixture = makeFixture('course-parent-subdir-marker');
+    // Two module courses, and two directories whose names end in a number. The
+    // trailing-number form is for video *files*; letting it count here would
+    // make this folder a course parent on the strength of four numbers.
+    for (const module of ['session 1', 'session 2']) {
+      fixture.put(`course/${module}/01 one.mp4`, 'video bytes\n');
+      fixture.put(`course/${module}/02 two.mp4`, 'video bytes\n');
+      fixture.put(`course/${module}/03 three.mp4`, 'video bytes\n');
+    }
+    fixture.put('course/notes 3/one.txt', 'text\n');
+    fixture.put('course/notes 4/two.txt', 'text\n');
+    const { store } = await scanFixture(fixture);
+
+    const found = listBundles(store);
+    expect(found.map((bundle) => bundle.relPath).sort()).toEqual(['course/session 1', 'course/session 2']);
+    expect(found.every((bundle) => bundle.type === 'course' && bundle.parentBundleId === null)).toBe(true);
+  });
+
+it('a trailing number does not change what an album needs', async () => {
+    const fixture = makeFixture('album-trailing-number');
+    // Albums are matched on a *leading* track number only. These carry trailing
+    // numbers, which the course rule now accepts but this one must not.
+    fixture.put('side one/opener 1.mp3', 'track bytes\n');
+    fixture.put('side one/middle 2.mp3', 'track bytes\n');
+    fixture.put('side one/closer 3.mp3', 'track bytes\n');
+    const { store } = await scanFixture(fixture);
+
+    expect(listBundles(store)).toEqual([]);
+  });
+
+it('two numbered videos are not a course', async () => {
     const fixture = makeFixture('course-too-few');
     fixture.put('clips/01 highlight.mp4', media('01'));
     fixture.put('clips/02 blooper.mp4', media('02'));

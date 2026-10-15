@@ -35,6 +35,14 @@ const LEADING_NUMBER = /^\s*\d{1,3}[ ._-]/;
 /** A named sequence marker: `lecture 3`, `Part 2`, `Week 1`, `Episode 12`. */
 const SEQUENCE_KEYWORD = /(?:lesson|lecture|module|part|episode|ep|chapter|week|day)\s*\d+/i;
 
+/**
+ * A one-to-three digit number at the end of a name, not preceded by a digit and
+ * followed by at most two non-digits: `Extra 2`, `Extra13`, `Extra 9#`.
+ * Four digits or a digit run preceded by more digits does not match, which is
+ * what keeps `IMG_1234` and `VID_20240101_120000` out.
+ */
+const TRAILING_NUMBER = /(?<!\d)\d{1,3}\D{0,2}$/;
+
 const MIN_COURSE_VIDEOS = 3;
 const MIN_ALBUM_TRACKS = 3;
 const MIN_PHOTO_IMAGES = 10;
@@ -75,6 +83,37 @@ export function hasLeadingNumber(name: string): boolean {
   return LEADING_NUMBER.test(name);
 }
 
+/**
+ * The marker for a course *video file*: a leading number, a keyword with a
+ * number, or a trailing sequence number.
+ *
+ * The trailing form exists because real course material is often named for its
+ * position rather than its content — Arvind's largest course is 20 files called
+ * `Extra 1.mp4` … `Extra13.mp4`, about 50 GB, none of which starts with a
+ * number. The lookbehind and the digit ceiling keep it away from the naming that
+ * floods every other folder: timestamps (`VID_20240101_120000`) and camera
+ * counters (`IMG_1234`) have four or more digits, or digits preceded by a digit.
+ *
+ * It is deliberately **not** part of {@link hasSequenceMarker}, which scores
+ * *subdirectory names* for a course parent. That rule was validated against
+ * real data only for leading numbers, and loosening it would silently change
+ * which folders become parents.
+ */
+export function hasCourseVideoMarker(name: string): boolean {
+  if (hasLeadingNumber(name) || SEQUENCE_KEYWORD.test(name)) return true;
+  // The trailing number must be read on the *stem*: applied to the whole name it
+  // would match every file whose extension ends in a digit — `intro.mp4`, and
+  // every camera `.h264` there is.
+  return TRAILING_NUMBER.test(stemOf(name));
+}
+
+/** The name without its extension, or the whole name when it has none. */
+function stemOf(name: string): string {
+  const dot = name.lastIndexOf('.');
+  return dot > 0 ? name.slice(0, dot) : name;
+}
+
+/** The marker for a *subdirectory name* in a course parent. */
 export function hasSequenceMarker(name: string): boolean {
   return hasLeadingNumber(name) || SEQUENCE_KEYWORD.test(name);
 }
@@ -144,7 +183,7 @@ function mediaMembers(files: DirFile[]): MediaMembers {
 /** `course`: ≥3 videos directly inside, ≥60% carrying a sequence marker. */
 function courseMatch(videos: string[]): Shape | null {
   if (videos.length < MIN_COURSE_VIDEOS) return null;
-  const marked = videos.filter((name) => hasSequenceMarker(name)).length;
+  const marked = videos.filter((name) => hasCourseVideoMarker(name)).length;
   if (!atLeastPercent(videos.length, SEQUENCE_PERCENT, marked)) return null;
   return {
     type: 'course',
