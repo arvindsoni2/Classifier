@@ -214,10 +214,18 @@ function courseChildrenOf(node: TreeNode, bundleByDir: Map<number, RecordedBundl
 
 /**
  * Writes the bundle row, points its directory and its items at it, and returns
- * what a possible parent will need. Items are matched by their directory, so a
- * member can never be claimed by two bundles.
+ * what a possible parent will need.
+ *
+ * `extracted_archive` is the one type that owns a *subtree* rather than a
+ * directory. An archive's contents are rarely flat — on Arvind's roots one had
+ * 23 files across 14 directories — so members, counts and total size cover
+ * everything below the directory, and a bundle found inside becomes its child
+ * while keeping its own files. Every other type attaches by directory id, which
+ * is what stops a member being claimed twice.
  */
 function writeBundle(store: CatalogueStore, scanId: number, node: TreeNode, match: Match): RecordedBundle {
+  if (match.type === 'extracted_archive') return writeArchiveBundle(store, scanId, node, match);
+
   const bundleId = store.upsertBundle({
     rootId: node.rootId,
     relPath: node.facts.relPath,
@@ -231,6 +239,31 @@ function writeBundle(store: CatalogueStore, scanId: number, node: TreeNode, matc
   store.setDirBundle(node.id, bundleId);
   store.setItemsBundle(node.id, bundleId);
   return { ...match, id: bundleId };
+}
+
+/** The archive case: one subtree, counted and adopted whole. */
+function writeArchiveBundle(
+  store: CatalogueStore,
+  scanId: number,
+  node: TreeNode,
+  match: Match,
+): RecordedBundle {
+  const stats = store.subtreeItemStats(node.rootId, node.facts.relPath);
+  const bundleId = store.upsertBundle({
+    rootId: node.rootId,
+    relPath: node.facts.relPath,
+    type: match.type,
+    parentBundleId: null,
+    rule: match.rule,
+    memberCount: stats.files,
+    totalSize: stats.bytes,
+    detectedScan: scanId,
+  });
+  store.setDirBundle(node.id, bundleId);
+  // Only files no other bundle claimed: a nested album keeps its own members.
+  store.setItemsBundleInSubtree(node.rootId, node.facts.relPath, bundleId);
+  store.setBundlesParentInSubtree(node.rootId, node.facts.relPath, bundleId);
+  return { ...match, id: bundleId, memberCount: stats.files, totalSize: stats.bytes };
 }
 
 /** Every bundle, ordered by root then path, for reports and tests. */

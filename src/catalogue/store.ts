@@ -128,6 +128,22 @@ export interface CatalogueStore {
   upsertBundle(row: BundleRow): number;
   /** Points a directory's items at their bundle, returning how many rows moved. */
   setItemsBundle(dirId: number, bundleId: number): number;
+  /**
+   * Counts and sizes every non-missing item in a directory's whole subtree,
+   * whatever bundle any of them belongs to. Used by `extracted_archive`, whose
+   * unit is the extracted tree rather than one directory.
+   */
+  subtreeItemStats(rootId: number, relPath: string): { files: number; bytes: number };
+  /**
+   * Points at their bundle only those items in a subtree that no other bundle
+   * has claimed, so a nested bundle keeps its own members.
+   */
+  setItemsBundleInSubtree(rootId: number, relPath: string, bundleId: number): number;
+  /**
+   * Records that every bundle strictly inside a subtree is a child of `bundleId`.
+   * Used by `extracted_archive`; the archive itself is excluded.
+   */
+  setBundlesParentInSubtree(rootId: number, relPath: string, bundleId: number): number;
   /** Sets the directory's own bundle pointer. */
   setDirBundle(dirId: number, bundleId: number): void;
   /** Records that a bundle became a child of another bundle. */
@@ -324,6 +340,39 @@ export function openStore(dataDir: string): CatalogueStore {
 
     setItemsBundle(dirId, bundleId) {
       return db.prepare('UPDATE items SET bundle_id = ? WHERE dir_id = ?').run(bundleId, dirId).changes;
+    },
+
+    subtreeItemStats(rootId, relPath) {
+      const row = db
+        .prepare(
+          `SELECT COUNT(*) AS files, COALESCE(SUM(i.size), 0) AS bytes
+           FROM items i JOIN dirs d ON d.id = i.dir_id
+           WHERE d.root_id = @rootId AND i.status <> 'missing'
+             AND (d.rel_path = @relPath OR d.rel_path LIKE @prefix)`,
+        )
+        .get({ rootId, relPath, prefix: `${relPath}/%` }) as { files: number; bytes: number };
+      return row;
+    },
+
+    setItemsBundleInSubtree(rootId, relPath, bundleId) {
+      return db
+        .prepare(
+          `UPDATE items SET bundle_id = @bundleId
+           WHERE bundle_id IS NULL AND status <> 'missing' AND dir_id IN (
+             SELECT id FROM dirs
+             WHERE root_id = @rootId AND (rel_path = @relPath OR rel_path LIKE @prefix))`,
+        )
+        .run({ rootId, relPath, prefix: `${relPath}/%`, bundleId }).changes;
+    },
+
+    setBundlesParentInSubtree(rootId, relPath, bundleId) {
+      return db
+        .prepare(
+          `UPDATE bundles SET parent_bundle_id = @bundleId
+           WHERE id <> @bundleId AND root_id = @rootId
+             AND rel_path LIKE @prefix AND (parent_bundle_id IS NULL OR parent_bundle_id = @bundleId)`,
+        )
+        .run({ rootId, prefix: `${relPath}/%`, bundleId }).changes;
     },
 
     setDirBundle(dirId, bundleId) {

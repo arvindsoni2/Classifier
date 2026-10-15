@@ -231,6 +231,86 @@ describe('bundle detection (Phase 1 Task 3)', () => {
     expect(found[0]?.memberCount).toBe(2);
   });
 
+  it('an extracted archive owns its whole subtree, not just its top level', async () => {
+    const fixture = makeFixture('archive-subtree');
+    // An archive's contents are rarely flat: the review found one with 23 files
+    // across 14 directories, reported as 0 members.
+    fixture.put('foo.zip', 'not a real zip, only the extension matters\n');
+    fixture.put('foo/a/1.txt', 'one\n');
+    fixture.put('foo/a/deeper/2.txt', 'two\n');
+    fixture.put('foo/b/3.txt', 'three\n');
+    const { store } = await scanFixture(fixture);
+
+    const archive = listBundles(store).find((bundle) => bundle.relPath === 'foo');
+    expect(archive?.type).toBe('extracted_archive');
+    expect(archive?.memberCount).toBe(3);
+    expect(archive?.totalSize).toBe('one\n'.length + 'two\n'.length + 'three\n'.length);
+    // Every loose file in the subtree is a member, at any depth.
+    const underFoo = itemsUnder(store, 'foo');
+    expect(underFoo).toHaveLength(3);
+    for (const item of underFoo) expect(item.bundle_id).toBe(archive?.id);
+  });
+
+  it('a bundle inside an extracted archive becomes its child', async () => {
+    const fixture = makeFixture('archive-nested-bundle');
+    fixture.put('foo.zip', 'not a real zip, only the extension matters\n');
+    fixture.put('foo/loose.txt', 'loose\n');
+    // An album inside the archive keeps its own identity as a bundle...
+    fixture.put('foo/album/01 one.mp3', 'first track bytes\n');
+    fixture.put('foo/album/02 two.mp3', 'second track bytes\n');
+    fixture.put('foo/album/03 three.mp3', 'third track bytes\n');
+    const { store } = await scanFixture(fixture);
+
+    const byPath = new Map(listBundles(store).map((bundle) => [bundle.relPath, bundle]));
+    const archive = byPath.get('foo');
+    const album = byPath.get('foo/album');
+    expect(archive?.type).toBe('extracted_archive');
+    expect(album?.type).toBe('album');
+    // ...but it belongs to the archive as its parent.
+    expect(album?.parentBundleId).toBe(archive?.id);
+    expect(archive?.parentBundleId).toBeNull();
+    // The album's own files stay the album's; the archive counts the subtree.
+    for (const item of itemsUnder(store, 'foo/album')) {
+      expect(item.bundle_id).toBe(album?.id);
+    }
+    expect(archive?.memberCount).toBe(4);
+    expect(itemsUnder(store, 'foo/loose.txt')[0]?.bundle_id).toBe(archive?.id);
+  });
+
+  it('an archive is not confused by a directory that merely looks like it', async () => {
+    const fixture = makeFixture('archive-name-collision');
+    fixture.put('foo.zip', 'not a real zip, only the extension matters\n');
+    fixture.put('bar/1.txt', 'in another directory\n');
+    fixture.put('bar/2.txt', 'and another\n');
+    const { store } = await scanFixture(fixture);
+
+    expect(listBundles(store)).toEqual([]);
+  });
+
+  it('a course parent is not broken by an extracted archive beneath it', async () => {
+    const fixture = makeFixture('archive-in-course');
+    // An archive extracted into a course folder, beside two module courses.
+    for (const module of ['01 foundations', '02 macros']) {
+      fixture.put(`course/${module}/01 one.mp4`, 'video bytes\n');
+      fixture.put(`course/${module}/02 two.mp4`, 'video bytes\n');
+      fixture.put(`course/${module}/03 three.mp4`, 'video bytes\n');
+    }
+    fixture.put('course/slides.zip', 'not a real zip\n');
+    fixture.put('course/slides/deck.txt', 'slide text\n');
+    const { store } = await scanFixture(fixture);
+
+    const byPath = new Map(listBundles(store).map((bundle) => [bundle.relPath, bundle]));
+    const archive = byPath.get('course/slides');
+    expect(archive?.type).toBe('extracted_archive');
+    // The archive is not a course, so the parent course still forms and adopts
+    // only its two modules.
+    expect(byPath.get('course')?.type).toBe('course');
+    expect(byPath.get('course')?.parentBundleId).toBeNull();
+    expect(byPath.get('course/01 foundations')?.parentBundleId).toBe(byPath.get('course')?.id);
+    expect(byPath.get('course/02 macros')?.parentBundleId).toBe(byPath.get('course')?.id);
+    expect(archive?.parentBundleId).toBeNull();
+  });
+
   it('a course parent links its numbered module bundles', async () => {
     const fixture = makeFixture('course-parent');
     for (const module of ['01 foundations', '02 macros']) {
