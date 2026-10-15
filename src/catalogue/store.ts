@@ -9,99 +9,32 @@
 import Database from 'better-sqlite3';
 import { chmodSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { migrateSchema } from './migrate.js';
+import type { CatalogueStore, ItemRow } from './store-types.js';
+import {
+  setBundleParent,
+  setBundlesParentInSubtree,
+  setDirBundle,
+  setItemsBundle,
+  setItemsBundleInSubtree,
+  subtreeItemStats,
+  upsertBundle,
+  upsertMetadata,
+} from './store-extras.js';
 
-export type ScanStatus = 'running' | 'done' | 'failed';
-export type ItemStatus = 'present' | 'missing' | 'incomplete';
-
-export interface ScanTotals {
-  filesSeen: number;
-  dirsSeen: number;
-  bytesSeen: number;
-  filesHashed: number;
-  errors: number;
-  symlinksSeen: number;
-  /**
-   * Bundle directories that stopped the walk. In-process only: like
-   * `symlinksSeen`, the `scans` table has no column for it (plan Task 3).
-   */
-  bundlesSeen: number;
-  /**
-   * Python virtualenvs skipped because their listing held `pyvenv.cfg`.
-   * In-process only, for the same reason as `symlinksSeen`.
-   */
-  virtualenvsSkipped: number;
-}
-
-export interface DirRow {
-  rootId: number;
-  relPath: string;
-  dev: string;
-  ino: string;
-  fileCount: number;
-  dirCount: number;
-  lastSeenScan: number;
-}
-
-export interface ItemRow {
-  rootId: number;
-  relPath: string;
-  dirId: number;
-  name: string;
-  ext: string;
-  kind: string;
-  size: number;
-  mtimeNs: string;
-  dev: string;
-  ino: string;
-  nlink: number;
-  status: ItemStatus;
-  scanId: number;
-}
-
-export type BundleType =
-  | 'code_repo'
-  | 'code_project'
-  | 'course'
-  | 'album'
-  | 'photo_set'
-  | 'extracted_archive';
-
-export interface BundleRow {
-  rootId: number;
-  relPath: string;
-  type: BundleType;
-  parentBundleId: number | null;
-  rule: string;
-  /** Null for the walk-stopping types: their contents were never catalogued. */
-  memberCount: number | null;
-  totalSize: number | null;
-  detectedScan: number;
-}
-
-export type MetadataStatus = 'ok' | 'unavailable' | 'failed' | 'timeout';
-
-/** One extractor result for one item (plan Task 4). */
-export interface MetadataRow {
-  itemId: number;
-  extractor: string;
-  extractorVersion: string;
-  status: MetadataStatus;
-  fieldsJson: string;
-  extractedScan: number;
-}
-
-/** What a root's volume looks like right now (plan Task 1, D31). */
-export interface RootVolume {
-  status: 'online' | 'offline';
-  volumeUuid: string | null;
-  volumeLabel: string | null;
-  fstype: string | null;
-  mountPoint: string | null;
-  isMountPoint: boolean | null;
-  /** inode|path — whether file identity comes from inodes or from paths. */
-  identityMode: 'inode' | 'path' | null;
-  lastOnlineAt: string | null;
-}
+export type {
+  BundleRow,
+  BundleType,
+  CatalogueStore,
+  DirRow,
+  ItemRow,
+  ItemStatus,
+  MetadataRow,
+  MetadataStatus,
+  RootVolume,
+  ScanStatus,
+  ScanTotals,
+} from './store-types.js';
 
 /** What an upsert has to know to decide whether hashes survive the scan. */
 interface ExistingItem {
@@ -112,98 +45,10 @@ interface ExistingItem {
   id: number;
 }
 
-export interface CatalogueStore {
-  readonly db: Database.Database;
-  /** Absolute path of the SQLite file. */
-  readonly path: string;
-  startScan(startedAt: string): number;
-  finishScan(scanId: number, status: ScanStatus, finishedAt: string, totals: ScanTotals): void;
-  upsertRoot(path: string, dev: string, ino: string, addedAt: string, scanId: number): number;
-  /** Records what a probe found about a root's volume, online or not. */
-  setRootVolume(rootId: number, volume: RootVolume): void;
-  /** Records that a scan covered this root, and whether it was online. */
-  recordScanRoot(row: { scanId: number; rootId: number; path: string; status: 'online' | 'offline'; fstype: string | null }): void;
-  setRootLastScan(rootId: number, scanId: number): void;
-  /** Inserts or updates one directory, returning its id. */
-  upsertDir(row: DirRow): number;
-  /**
-   * Inserts or updates files. An item whose `(dev, ino, size, mtime_ns)` is
-   * unchanged keeps its hashes; anything else invalidates them, because a
-   * changed file can no longer be trusted to hash to its recorded value.
-   */
-  upsertItems(rows: ItemRow[]): void;
-  /** Rows are never deleted: present items this scan did not see become missing. */
-  markMissingNotSeen(rootId: number, scanId: number): number;
-  addErrors(rows: { scanId: number; rootId: number; relPath: string; code: string; message: string }[]): void;
-  /** Persists a candidate's partial hash; the full hash stays untouched. */
-  setItemPartialHash(rootId: number, relPath: string, partialHash: string): void;
-  /** Persists a candidate's full hash; the partial hash stays untouched. */
-  setItemFullHash(rootId: number, relPath: string, sha256: string): void;
-  /** Records how many distinct files this scan's hashing pass read. */
-  setFilesHashed(scanId: number, filesHashed: number): void;
-  /** Inserts or updates one bundle, returning its id. */
-  upsertBundle(row: BundleRow): number;
-  /** Points a directory's items at their bundle, returning how many rows moved. */
-  setItemsBundle(dirId: number, bundleId: number): number;
-  /**
-   * Counts and sizes every non-missing item in a directory's whole subtree,
-   * whatever bundle any of them belongs to. Used by `extracted_archive`, whose
-   * unit is the extracted tree rather than one directory.
-   */
-  subtreeItemStats(rootId: number, relPath: string): { files: number; bytes: number };
-  /**
-   * Points at their bundle only those items in a subtree that no other bundle
-   * has claimed, so a nested bundle keeps its own members.
-   */
-  setItemsBundleInSubtree(rootId: number, relPath: string, bundleId: number): number;
-  /**
-   * Records that every bundle strictly inside a subtree is a child of `bundleId`.
-   * Used by `extracted_archive`; the archive itself is excluded.
-   */
-  setBundlesParentInSubtree(rootId: number, relPath: string, bundleId: number): number;
-  /** Sets the directory's own bundle pointer. */
-  setDirBundle(dirId: number, bundleId: number): void;
-  /** Records that a bundle became a child of another bundle. */
-  setBundleParent(bundleId: number, parentBundleId: number): void;
-  /** Writes one extractor result, replacing any earlier result for that pair. */
-  upsertMetadata(row: MetadataRow): void;
-  close(): void;
-}
-
 const SCHEMA = new URL('./schema.sql', import.meta.url);
 
 function applySchema(db: Database.Database): void {
   db.exec(readFileSync(SCHEMA, 'utf8'));
-}
-
-/**
- * Columns added after this schema's first shape.
- *
- * `CREATE TABLE IF NOT EXISTS` cannot widen a table that already exists, so a
- * catalogue created before volumes existed would open with the old shape and
- * every volume write would fail against it. Each column is added only when
- * absent, which makes opening an existing database safe and idempotent: existing
- * rows keep their values and read as null for the new facts until the next scan
- * records them.
- */
-const ADDED_ROOT_COLUMNS: readonly (readonly [string, string])[] = [
-  ['status', 'TEXT'],
-  ['volume_uuid', 'TEXT'],
-  ['volume_label', 'TEXT'],
-  ['fstype', 'TEXT'],
-  ['mount_point', 'TEXT'],
-  ['is_mount_point', 'INTEGER'],
-  ['identity_mode', 'TEXT'],
-  ['last_online_at', 'TEXT'],
-];
-
-function migrateSchema(db: Database.Database): void {
-  const present = new Set(
-    (db.prepare('PRAGMA table_info(roots)').all() as { name: string }[]).map((column) => column.name),
-  );
-  for (const [name, type] of ADDED_ROOT_COLUMNS) {
-    if (!present.has(name)) db.exec(`ALTER TABLE roots ADD COLUMN ${name} ${type}`);
-  }
 }
 
 /** Restricts an existing file or directory to the owner (mode 0700/0600). */
@@ -396,74 +241,35 @@ export function openStore(dataDir: string): CatalogueStore {
     },
 
     upsertBundle(row) {
-      db.prepare(
-        `INSERT INTO bundles (root_id, rel_path, type, parent_bundle_id, rule, member_count, total_size, detected_scan)
-         VALUES (@rootId, @relPath, @type, @parentBundleId, @rule, @memberCount, @totalSize, @detectedScan)
-         ON CONFLICT (root_id, rel_path) DO UPDATE SET
-           type = excluded.type, parent_bundle_id = excluded.parent_bundle_id, rule = excluded.rule,
-           member_count = excluded.member_count, total_size = excluded.total_size,
-           detected_scan = excluded.detected_scan`,
-      ).run(row);
-      const found = db
-        .prepare('SELECT id FROM bundles WHERE root_id = ? AND rel_path = ?')
-        .get(row.rootId, row.relPath) as { id: number } | undefined;
-      if (found === undefined) throw new Error(`bundle row vanished after insert: ${row.relPath}`);
-      return found.id;
+      return upsertBundle(db, row);
     },
 
     setItemsBundle(dirId, bundleId) {
-      return db.prepare('UPDATE items SET bundle_id = ? WHERE dir_id = ?').run(bundleId, dirId).changes;
+      return setItemsBundle(db, dirId, bundleId);
     },
 
     subtreeItemStats(rootId, relPath) {
-      const row = db
-        .prepare(
-          `SELECT COUNT(*) AS files, COALESCE(SUM(i.size), 0) AS bytes
-           FROM items i JOIN dirs d ON d.id = i.dir_id
-           WHERE d.root_id = @rootId AND i.status <> 'missing'
-             AND (d.rel_path = @relPath OR d.rel_path LIKE @prefix)`,
-        )
-        .get({ rootId, relPath, prefix: `${relPath}/%` }) as { files: number; bytes: number };
-      return row;
+      return subtreeItemStats(db, rootId, relPath);
     },
 
     setItemsBundleInSubtree(rootId, relPath, bundleId) {
-      return db
-        .prepare(
-          `UPDATE items SET bundle_id = @bundleId
-           WHERE bundle_id IS NULL AND status <> 'missing' AND dir_id IN (
-             SELECT id FROM dirs
-             WHERE root_id = @rootId AND (rel_path = @relPath OR rel_path LIKE @prefix))`,
-        )
-        .run({ rootId, relPath, prefix: `${relPath}/%`, bundleId }).changes;
+      return setItemsBundleInSubtree(db, rootId, relPath, bundleId);
     },
 
     setBundlesParentInSubtree(rootId, relPath, bundleId) {
-      return db
-        .prepare(
-          `UPDATE bundles SET parent_bundle_id = @bundleId
-           WHERE id <> @bundleId AND root_id = @rootId
-             AND rel_path LIKE @prefix AND (parent_bundle_id IS NULL OR parent_bundle_id = @bundleId)`,
-        )
-        .run({ rootId, prefix: `${relPath}/%`, bundleId }).changes;
+      return setBundlesParentInSubtree(db, rootId, relPath, bundleId);
     },
 
     setDirBundle(dirId, bundleId) {
-      db.prepare('UPDATE dirs SET bundle_id = ? WHERE id = ?').run(bundleId, dirId);
+      setDirBundle(db, dirId, bundleId);
     },
 
     setBundleParent(bundleId, parentBundleId) {
-      db.prepare('UPDATE bundles SET parent_bundle_id = ? WHERE id = ?').run(parentBundleId, bundleId);
+      setBundleParent(db, bundleId, parentBundleId);
     },
 
     upsertMetadata(row) {
-      db.prepare(
-        `INSERT INTO metadata (item_id, extractor, extractor_version, status, fields_json, extracted_scan)
-         VALUES (@itemId, @extractor, @extractorVersion, @status, @fieldsJson, @extractedScan)
-         ON CONFLICT (item_id, extractor) DO UPDATE SET
-           extractor_version = excluded.extractor_version, status = excluded.status,
-           fields_json = excluded.fields_json, extracted_scan = excluded.extracted_scan`,
-      ).run(row);
+      upsertMetadata(db, row);
     },
 
     close() {

@@ -1,0 +1,159 @@
+/**
+ * The shapes the catalogue stores, and the contract they are written through.
+ *
+ * Separated from `store.ts` so the declarations say what a row is while the
+ * implementation says how it reaches SQLite. `store.ts` re-exports everything
+ * here, so callers keep importing from one place.
+ */
+import type Database from 'better-sqlite3';
+
+export type ScanStatus = 'running' | 'done' | 'failed';
+export type ItemStatus = 'present' | 'missing' | 'incomplete';
+
+export interface ScanTotals {
+  filesSeen: number;
+  dirsSeen: number;
+  bytesSeen: number;
+  filesHashed: number;
+  errors: number;
+  symlinksSeen: number;
+  /**
+   * Bundle directories that stopped the walk. In-process only: like
+   * `symlinksSeen`, the `scans` table has no column for it (plan Task 3).
+   */
+  bundlesSeen: number;
+  /**
+   * Python virtualenvs skipped because their listing held `pyvenv.cfg`.
+   * In-process only, for the same reason as `symlinksSeen`.
+   */
+  virtualenvsSkipped: number;
+}
+
+export interface DirRow {
+  rootId: number;
+  relPath: string;
+  dev: string;
+  ino: string;
+  fileCount: number;
+  dirCount: number;
+  lastSeenScan: number;
+}
+
+export interface ItemRow {
+  rootId: number;
+  relPath: string;
+  dirId: number;
+  name: string;
+  ext: string;
+  kind: string;
+  size: number;
+  mtimeNs: string;
+  dev: string;
+  ino: string;
+  nlink: number;
+  status: ItemStatus;
+  scanId: number;
+}
+
+export type BundleType =
+  | 'code_repo'
+  | 'code_project'
+  | 'course'
+  | 'album'
+  | 'photo_set'
+  | 'extracted_archive';
+
+export interface BundleRow {
+  rootId: number;
+  relPath: string;
+  type: BundleType;
+  parentBundleId: number | null;
+  rule: string;
+  /** Null for the walk-stopping types: their contents were never catalogued. */
+  memberCount: number | null;
+  totalSize: number | null;
+  detectedScan: number;
+}
+
+export type MetadataStatus = 'ok' | 'unavailable' | 'failed' | 'timeout';
+
+/** One extractor result for one item (plan Task 4). */
+export interface MetadataRow {
+  itemId: number;
+  extractor: string;
+  extractorVersion: string;
+  status: MetadataStatus;
+  fieldsJson: string;
+  extractedScan: number;
+}
+
+/** What a root's volume looks like right now (plan Task 1, D31). */
+export interface RootVolume {
+  status: 'online' | 'offline';
+  volumeUuid: string | null;
+  volumeLabel: string | null;
+  fstype: string | null;
+  mountPoint: string | null;
+  isMountPoint: boolean | null;
+  /** inode|path — whether file identity comes from inodes or from paths. */
+  identityMode: 'inode' | 'path' | null;
+  lastOnlineAt: string | null;
+}
+
+export interface CatalogueStore {
+  readonly db: Database.Database;
+  /** Absolute path of the SQLite file. */
+  readonly path: string;
+  startScan(startedAt: string): number;
+  finishScan(scanId: number, status: ScanStatus, finishedAt: string, totals: ScanTotals): void;
+  upsertRoot(path: string, dev: string, ino: string, addedAt: string, scanId: number): number;
+  /** Records what a probe found about a root's volume, online or not. */
+  setRootVolume(rootId: number, volume: RootVolume): void;
+  /** Records that a scan covered this root, and whether it was online. */
+  recordScanRoot(row: { scanId: number; rootId: number; path: string; status: 'online' | 'offline'; fstype: string | null }): void;
+  setRootLastScan(rootId: number, scanId: number): void;
+  /** Inserts or updates one directory, returning its id. */
+  upsertDir(row: DirRow): number;
+  /**
+   * Inserts or updates files. An item whose `(dev, ino, size, mtime_ns)` is
+   * unchanged keeps its hashes; anything else invalidates them, because a
+   * changed file can no longer be trusted to hash to its recorded value.
+   */
+  upsertItems(rows: ItemRow[]): void;
+  /** Rows are never deleted: present items this scan did not see become missing. */
+  markMissingNotSeen(rootId: number, scanId: number): number;
+  addErrors(rows: { scanId: number; rootId: number; relPath: string; code: string; message: string }[]): void;
+  /** Persists a candidate's partial hash; the full hash stays untouched. */
+  setItemPartialHash(rootId: number, relPath: string, partialHash: string): void;
+  /** Persists a candidate's full hash; the partial hash stays untouched. */
+  setItemFullHash(rootId: number, relPath: string, sha256: string): void;
+  /** Records how many distinct files this scan's hashing pass read. */
+  setFilesHashed(scanId: number, filesHashed: number): void;
+  /** Inserts or updates one bundle, returning its id. */
+  upsertBundle(row: BundleRow): number;
+  /** Points a directory's items at their bundle, returning how many rows moved. */
+  setItemsBundle(dirId: number, bundleId: number): number;
+  /**
+   * Counts and sizes every non-missing item in a directory's whole subtree,
+   * whatever bundle any of them belongs to. Used by `extracted_archive`, whose
+   * unit is the extracted tree rather than one directory.
+   */
+  subtreeItemStats(rootId: number, relPath: string): { files: number; bytes: number };
+  /**
+   * Points at their bundle only those items in a subtree that no other bundle
+   * has claimed, so a nested bundle keeps its own members.
+   */
+  setItemsBundleInSubtree(rootId: number, relPath: string, bundleId: number): number;
+  /**
+   * Records that every bundle strictly inside a subtree is a child of `bundleId`.
+   * Used by `extracted_archive`; the archive itself is excluded.
+   */
+  setBundlesParentInSubtree(rootId: number, relPath: string, bundleId: number): number;
+  /** Sets the directory's own bundle pointer. */
+  setDirBundle(dirId: number, bundleId: number): void;
+  /** Records that a bundle became a child of another bundle. */
+  setBundleParent(bundleId: number, parentBundleId: number): void;
+  /** Writes one extractor result, replacing any earlier result for that pair. */
+  upsertMetadata(row: MetadataRow): void;
+  close(): void;
+}

@@ -13,10 +13,11 @@
  * Nothing in this module creates, moves, modifies or deletes anything inside a
  * root: files are opened read-only for at most 16 bytes.
  */
-import { opendir, open, lstat } from 'node:fs/promises';
+import { open, lstat } from 'node:fs/promises';
 import { join } from 'node:path';
-import { matchesExclude, type CatalogueConfig } from './config.js';
+import { type CatalogueConfig } from './config.js';
 import { detectKind, extensionOf, MAGIC_PREFIX_BYTES } from './kinds.js';
+import { listDirectory, type Listing } from './list-directory.js';
 import type { CatalogueStore, DirRow, ItemRow, ItemStatus, ScanTotals } from './store.js';
 
 export interface ScanResult {
@@ -89,19 +90,6 @@ interface PendingDir {
   absPath: string;
 }
 
-interface Listing {
-  /** Names of regular files, hidden and excluded entries removed. */
-  files: string[];
-  /** Names of subdirectories worth entering, in the same order. */
-  dirs: string[];
-  /** All entry names, for the bundle hook. */
-  allNames: string[];
-  /** Symlinks seen but never followed and never recorded. */
-  symlinks: number;
-  fileCount: number;
-  dirCount: number;
-}
-
 /** Rows are inserted in batches of this size (plan Task 1 rule 8). */
 const BATCH_ROWS = 1_000;
 
@@ -116,10 +104,6 @@ const INCOMPLETE_EXTENSIONS: ReadonlySet<string> = new Set(['part', 'crdownload'
  * and by no ordinary directory, so one entry in a listing is enough.
  */
 const VIRTUALENV_MARKER = 'pyvenv.cfg';
-
-function isHidden(name: string): boolean {
-  return name.startsWith('.');
-}
 
 function statusFor(name: string): ItemStatus {
   return INCOMPLETE_EXTENSIONS.has(extensionOf(name)) ? 'incomplete' : 'present';
@@ -347,36 +331,6 @@ async function scanRoot(
   store.markMissingNotSeen(rootId, scanId);
   store.setRootLastScan(rootId, scanId);
   return 'online';
-}
-
-/** One directory's listing, filtered and classified. */
-async function listDirectory(absPath: string, exclude: readonly string[]): Promise<Listing> {
-  const files: string[] = [];
-  const dirs: string[] = [];
-  const allNames: string[] = [];
-  let symlinks = 0;
-  const dir = await opendir(absPath);
-  for await (const entry of dir) {
-    allNames.push(entry.name);
-    if (entry.isSymbolicLink()) {
-      // Counted for the totals; nothing is recorded and nothing is followed.
-      symlinks += 1;
-      continue;
-    }
-    if (matchesExclude(entry.name, exclude)) continue;
-    if (entry.isFile()) {
-      if (isHidden(entry.name)) continue;
-      files.push(entry.name);
-      continue;
-    }
-    if (entry.isDirectory()) {
-      if (isHidden(entry.name)) continue;
-      dirs.push(entry.name);
-      continue;
-    }
-    // Sockets, FIFOs, character and block devices: skipped by design.
-  }
-  return { files, dirs, allNames, symlinks, fileCount: files.length, dirCount: dirs.length };
 }
 
 /** Best-effort error classification; the message is kept verbatim. */
