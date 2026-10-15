@@ -638,3 +638,87 @@ commit.
 
 The review's "should fix" items were left alone as instructed, and no other task
 was started.
+
+---
+
+## Review follow-up — Phase 1 blockers
+
+Three commits, one per blocker, in the order they were approved:
+
+| Commit | Blocker |
+| --- | --- |
+| `24214b6` | 1 — Python virtualenvs catalogued file by file |
+| `a3d5376` | 3 — `extracted_archive` claimed only its top level |
+| `810a6ff` | 2 — the largest course on disk was not a course |
+
+**Tests:** 297 pass (286 before, +11). `pnpm typecheck`, `pnpm lint` and
+`pnpm test` all pass. Every blocker was verified against Arvind's real catalogue
+first, read-only through `catalogue.sqlite`, before any code was written:
+19,287 of 23,323 items (82.7%) sat in three virtualenvs, 20/20 videos in
+`Geekforgeeks GenAI course` carried no marker, and
+`AWS SAA _C03/code_v2025-10-27` reported 0 members against 23 files in 14
+directories below it.
+
+### Blocker 1 — virtualenvs are identified by content
+
+`exclude` matches `.venv` and `venv` by name, and nobody names an environment
+that way: the three on disk are `env1`, `myenv` and `pytorch_env`. A directory
+whose listing contains `pyvenv.cfg` is now treated exactly like an excluded
+name — not entered, no directory row, nothing recorded — and the configured root
+is exempt, since skipping it would catalogue nothing at all. Counted as
+`ScanTotals.virtualenvsSkipped`, in-process only, for the same reason as
+`symlinksSeen`.
+
+### Blocker 3 — an archive is a subtree
+
+`extracted_archive` attached members by `dir_id`, so any archive with a
+subdirectory reported almost nothing. For this type only, `member_count` and
+`total_size` now cover every non-missing item in the subtree, loose items at any
+depth are pointed at the archive, and a bundle inside becomes its child through
+`parent_bundle_id` while keeping its own files. Every other type still attaches
+by directory id, which is what prevents a member being claimed twice.
+
+### Blocker 2 — a trailing number marks a course video
+
+`Geekforgeeks GenAI course` is ~50 GB of `Extra 1.mp4` … `Extra13.mp4`. A course
+video now also matches `(?<!\d)\d{1,3}\D{0,2}$`. Two details the amendment did not
+spell out, both found by tests:
+
+- **The marker must be read on the stem, not the whole name.** Applied to
+  `intro.mp4` it matches the `4` in the extension, and every video in the
+  catalogue becomes a marker. The first implementation did exactly that.
+- **It is deliberately excluded from the subdirectory-name marker.** That marker
+  decides whether a folder is a course parent, and it was validated on real data
+  only for leading numbers. `hasCourseVideoMarker` and `hasSequenceMarker` are
+  now separate functions with that distinction written down.
+
+Independently verified over all 52 catalogued videos: the new marker marks 20/20
+in that folder and creates no other new course, and it does not match `IMG_1234`
+or `VID_20240101_120000`.
+
+### Mutation checks
+
+Eleven mutations, each caught by the test that owns the rule: virtualenv skip
+removed, root exemption removed, archive back to the flat rule, no parent link,
+no member adoption, flat counts, trailing marker dropped, marker read on the full
+name, digit ceiling raised to four, subdirectory naming loosened too.
+
+Two mutations survived the first attempt, and both exposed a bad fixture rather
+than a bad rule: the negative video fixture had been written with its files in
+the **root**, which is never a bundle and so asserted nothing, and nothing pinned
+the subdirectory decision. Both are now covered.
+
+### Still open
+
+The review's nine "should fix" items are untouched, as agreed. Two are worth
+naming because a rescan will show them:
+
+- The 87 metadata failures (`pdfinfo` 39 including 20 password-protected, `exif`
+  38, `epub` 5, `office` 5) are invisible in the report, which still says
+  "0 errors".
+- Because bundle rows are scoped by `detected_scan`, the next scan re-stamps every
+  bundle, so `report --scan 1` will no longer show the historical bundles.
+
+A rescan after these three fixes will mark the 19,287 virtualenv items `missing`,
+which is correct — rows are kept, never deleted — but it will look like a large
+drop in item count. Expected: about 4,036 items and 536 duplicate groups remain.
