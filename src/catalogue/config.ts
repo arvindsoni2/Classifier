@@ -80,14 +80,15 @@ export function validateConfig(raw: unknown): CatalogueConfig {
     if (!isAbsolute(expanded)) {
       throw new ConfigError(`root ${JSON.stringify(entry)} must be an absolute path`);
     }
-    if (!existsSync(expanded)) {
-      throw new ConfigError(`root ${JSON.stringify(entry)} does not exist (resolved to ${expanded})`);
-    }
-    if (!statSync(expanded).isDirectory()) {
+    // A root that is not there right now is an unplugged drive, not a mistake:
+    // the scan reports it as offline (plan Task 1, D31). A path that does exist
+    // but is not a directory is a genuine mistake and still refused.
+    if (existsSync(expanded) && !statSync(expanded).isDirectory()) {
       throw new ConfigError(`root ${JSON.stringify(entry)} is not a directory`);
     }
-    // Realpath so a symlinked root is compared against what it really is.
-    roots.push(realpathSync(expanded));
+    // Realpath so a symlinked root is compared against what it really is. A
+    // missing root has nothing to resolve, so it keeps its lexical path.
+    roots.push(existsSync(expanded) ? realpathSync(expanded) : expanded);
   }
 
   const dataDirRaw = record.dataDir;

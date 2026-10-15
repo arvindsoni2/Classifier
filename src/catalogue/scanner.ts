@@ -23,8 +23,42 @@ export interface ScanResult {
   scanId: number;
   /** Number of roots scanned. */
   roots: number;
+  /** Roots a probe found present and walked. */
+  rootsOnline: number;
+  /** Roots a probe reported missing: skipped, with no item touched. */
+  rootsOffline: number;
   totals: ScanTotals;
   elapsedMs: number;
+}
+
+/**
+ * What a probe found about the filesystem a path sits on.
+ *
+ * `uuid` is null for filesystems that have none (vfat, and some FUSE mounts) —
+ * which is exactly why it cannot be the only identity signal.
+ */
+export interface VolumeInfo {
+  uuid: string | null;
+  label: string | null;
+  fstype: string;
+  mountPoint: string;
+}
+
+/**
+ * Reports the filesystem at `path`, or null when the path does not exist.
+ *
+ * Task 1a only defines the seam and records what it is told; the real probe
+ * (findmnt) and the offline / volume-changed / path-mode decisions belong to
+ * Task 1b, so a scan without a probe behaves exactly as it did before.
+ */
+export type VolumeProbe = (path: string) => Promise<VolumeInfo | null>;
+
+/** Filesystems where an inode number identifies a file across scans. */
+const INODE_IDENTITY_FS: ReadonlySet<string> = new Set(['ext4', 'xfs', 'btrfs', 'f2fs', 'ext3', 'ext2']);
+
+/** Inode|path: the only thing a filesystem type decides here. */
+export function identityModeFor(fstype: string): 'inode' | 'path' {
+  return INODE_IDENTITY_FS.has(fstype) ? 'inode' : 'path';
 }
 
 /** One directory as the scanner sees it, handed to `onDirectory`. */
@@ -40,12 +74,13 @@ export interface ScanDirectoryContext {
 }
 
 /**
- * Hook for later phases. `onDirectory` receives the directory's listing
- * (including hidden names) and may return `false` to stop the scanner
- * descending — how Task 3 stops at a bundle boundary.
+ * Hooks and seams for a scan. `onDirectory` receives the directory's listing and
+ * may return `false` to stop the scanner descending — how Task 3 stops at a
+ * bundle boundary. `volumeProbe` is asked once per root.
  */
 export interface ScanHooks {
   onDirectory?: (dir: ScanDirectoryContext) => boolean | void;
+  volumeProbe?: VolumeProbe;
 }
 
 interface PendingDir {
@@ -106,7 +141,11 @@ async function readHead(absPath: string): Promise<Buffer | null> {
   }
 }
 
-/** Walks one root, recording directories and files, and returns its errors. */
+/**
+ * Walks one root, recording directories and files, and returns its errors.
+ * Returns the root's status: `offline` when a probe says the path is not there,
+ * in which case nothing below was touched.
+ */
 async function scanRoot(
   config: CatalogueConfig,
   store: CatalogueStore,
@@ -114,12 +153,55 @@ async function scanRoot(
   scanId: number,
   totals: ScanTotals,
   hooks: ScanHooks,
-): Promise<void> {
+): Promise<'online' | 'offline'> {
+  const startedAt = new Date().toISOString();
+  const volume = hooks.volumeProbe === undefined ? null : await hooks.volumeProbe(rootPath);
+
+  // Offline: the root is not there. It is recorded and skipped without touching a
+  // single item — an absent drive is not a deleted directory, and marking its
+  // files missing would be the most destructive thing this scan could do.
+  if (hooks.volumeProbe !== undefined && volume === null) {
+    const offlineId = store.upsertRoot(rootPath, '0', '0', startedAt, scanId);
+    store.setRootVolume(offlineId, {
+      status: 'offline',
+      volumeUuid: null,
+      volumeLabel: null,
+      fstype: null,
+      mountPoint: null,
+      isMountPoint: null,
+      identityMode: null,
+      // Deliberately unchanged: the last time this drive was actually readable.
+      lastOnlineAt: null,
+    });
+    store.recordScanRoot({ scanId, rootId: offlineId, path: rootPath, status: 'offline', fstype: null });
+    store.setRootLastScan(offlineId, scanId);
+    return 'offline';
+  }
+
   const rootStat = await lstat(rootPath, { bigint: true });
   if (!rootStat.isDirectory()) {
     throw new Error(`root ${rootPath} is not a directory`);
   }
-  const rootId = store.upsertRoot(rootPath, rootStat.dev.toString(), rootStat.ino.toString(), new Date().toISOString(), scanId);
+  const rootId = store.upsertRoot(
+    rootPath,
+    rootStat.dev.toString(),
+    rootStat.ino.toString(),
+    startedAt,
+    scanId,
+  );
+  if (volume !== null) {
+    store.setRootVolume(rootId, {
+      status: 'online',
+      volumeUuid: volume.uuid,
+      volumeLabel: volume.label,
+      fstype: volume.fstype,
+      mountPoint: volume.mountPoint,
+      isMountPoint: volume.mountPoint === rootPath,
+      identityMode: identityModeFor(volume.fstype),
+      lastOnlineAt: startedAt,
+    });
+    store.recordScanRoot({ scanId, rootId, path: rootPath, status: 'online', fstype: volume.fstype });
+  }
   const rootDev = rootStat.dev;
 
   const stack: PendingDir[] = [{ rootId, relPath: '', absPath: rootPath }];
@@ -259,8 +341,12 @@ async function scanRoot(
   }
 
   flush();
+  // Only a root that was actually walked may retire its unseen items. The
+  // offline path returns before reaching here, which is what stops an unplugged
+  // drive from marking everything it holds as missing.
   store.markMissingNotSeen(rootId, scanId);
   store.setRootLastScan(rootId, scanId);
+  return 'online';
 }
 
 /** One directory's listing, filtered and classified. */
@@ -328,11 +414,15 @@ export async function scan(
   };
 
   try {
+    let rootsOnline = 0;
+    let rootsOffline = 0;
     for (const root of config.roots) {
-      await scanRoot(config, store, root, scanId, totals, hooks);
+      const status = await scanRoot(config, store, root, scanId, totals, hooks);
+      if (status === 'online') rootsOnline += 1;
+      else rootsOffline += 1;
     }
     store.finishScan(scanId, 'done', new Date().toISOString(), totals);
-    return { scanId, roots: config.roots.length, totals, elapsedMs: Date.now() - started };
+    return { scanId, roots: config.roots.length, rootsOnline, rootsOffline, totals, elapsedMs: Date.now() - started };
   } catch (error) {
     store.finishScan(scanId, 'failed', new Date().toISOString(), totals);
     throw error;

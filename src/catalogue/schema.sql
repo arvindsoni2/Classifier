@@ -5,13 +5,40 @@
 -- Integer stat values that can exceed 2^53 (dev, ino, mtime_ns) are stored as
 -- decimal strings and read back with bigint:true (plan Task 1).
 
+-- `roots` carries the volume facts as well as the path (plan Task 1, D31): a
+-- root may sit on an external drive that is unplugged, reformatted, or replaced
+-- by a different drive at the same path. `dev`/`ino` are kept for the
+-- catalogue's history; they are never compared across scans, because a USB
+-- drive gets a new device number every time it is plugged in.
+--
+-- `status` is online|offline, `identity_mode` is inode|path.
 CREATE TABLE IF NOT EXISTS roots (
-  id            INTEGER PRIMARY KEY,
-  path          TEXT    NOT NULL UNIQUE,
-  dev           TEXT    NOT NULL,
-  ino           TEXT    NOT NULL,
-  added_at      TEXT    NOT NULL,
-  last_scan_id  INTEGER
+  id               INTEGER PRIMARY KEY,
+  path             TEXT    NOT NULL UNIQUE,
+  dev              TEXT    NOT NULL,
+  ino              TEXT    NOT NULL,
+  status           TEXT    CHECK (status IN ('online', 'offline')),
+  volume_uuid      TEXT,
+  volume_label     TEXT,
+  fstype           TEXT,
+  mount_point      TEXT,
+  is_mount_point   INTEGER,
+  identity_mode    TEXT    CHECK (identity_mode IN ('inode', 'path')),
+  added_at         TEXT    NOT NULL,
+  last_scan_id     INTEGER,
+  last_online_at   TEXT
+);
+
+-- Which roots a given scan covered, and whether each was online. A report needs
+-- this to say which drives were included: the same path can be scanned from a
+-- different volume from one run to the next.
+CREATE TABLE IF NOT EXISTS scan_roots (
+  scan_id   INTEGER NOT NULL REFERENCES scans(id),
+  root_id   INTEGER NOT NULL REFERENCES roots(id),
+  path      TEXT    NOT NULL,
+  status    TEXT    NOT NULL CHECK (status IN ('online', 'offline')),
+  fstype    TEXT,
+  PRIMARY KEY (scan_id, root_id)
 );
 
 CREATE TABLE IF NOT EXISTS scans (

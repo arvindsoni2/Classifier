@@ -90,6 +90,19 @@ export interface MetadataRow {
   extractedScan: number;
 }
 
+/** What a root's volume looks like right now (plan Task 1, D31). */
+export interface RootVolume {
+  status: 'online' | 'offline';
+  volumeUuid: string | null;
+  volumeLabel: string | null;
+  fstype: string | null;
+  mountPoint: string | null;
+  isMountPoint: boolean | null;
+  /** inode|path — whether file identity comes from inodes or from paths. */
+  identityMode: 'inode' | 'path' | null;
+  lastOnlineAt: string | null;
+}
+
 /** What an upsert has to know to decide whether hashes survive the scan. */
 interface ExistingItem {
   dev: string;
@@ -106,6 +119,10 @@ export interface CatalogueStore {
   startScan(startedAt: string): number;
   finishScan(scanId: number, status: ScanStatus, finishedAt: string, totals: ScanTotals): void;
   upsertRoot(path: string, dev: string, ino: string, addedAt: string, scanId: number): number;
+  /** Records what a probe found about a root's volume, online or not. */
+  setRootVolume(rootId: number, volume: RootVolume): void;
+  /** Records that a scan covered this root, and whether it was online. */
+  recordScanRoot(row: { scanId: number; rootId: number; path: string; status: 'online' | 'offline'; fstype: string | null }): void;
   setRootLastScan(rootId: number, scanId: number): void;
   /** Inserts or updates one directory, returning its id. */
   upsertDir(row: DirRow): number;
@@ -159,6 +176,36 @@ function applySchema(db: Database.Database): void {
   db.exec(readFileSync(SCHEMA, 'utf8'));
 }
 
+/**
+ * Columns added after this schema's first shape.
+ *
+ * `CREATE TABLE IF NOT EXISTS` cannot widen a table that already exists, so a
+ * catalogue created before volumes existed would open with the old shape and
+ * every volume write would fail against it. Each column is added only when
+ * absent, which makes opening an existing database safe and idempotent: existing
+ * rows keep their values and read as null for the new facts until the next scan
+ * records them.
+ */
+const ADDED_ROOT_COLUMNS: readonly (readonly [string, string])[] = [
+  ['status', 'TEXT'],
+  ['volume_uuid', 'TEXT'],
+  ['volume_label', 'TEXT'],
+  ['fstype', 'TEXT'],
+  ['mount_point', 'TEXT'],
+  ['is_mount_point', 'INTEGER'],
+  ['identity_mode', 'TEXT'],
+  ['last_online_at', 'TEXT'],
+];
+
+function migrateSchema(db: Database.Database): void {
+  const present = new Set(
+    (db.prepare('PRAGMA table_info(roots)').all() as { name: string }[]).map((column) => column.name),
+  );
+  for (const [name, type] of ADDED_ROOT_COLUMNS) {
+    if (!present.has(name)) db.exec(`ALTER TABLE roots ADD COLUMN ${name} ${type}`);
+  }
+}
+
 /** Restricts an existing file or directory to the owner (mode 0700/0600). */
 function ownerOnly(path: string, mode: number): void {
   try {
@@ -184,6 +231,7 @@ export function openStore(dataDir: string): CatalogueStore {
   for (const suffix of ['-wal', '-shm']) ownerOnly(`${path}${suffix}`, 0o600);
 
   applySchema(db);
+  migrateSchema(db);
 
   const selectItem = db.prepare(
     // Aliased to camelCase so the caller compares the fields it names; a
@@ -260,6 +308,28 @@ export function openStore(dataDir: string): CatalogueStore {
       db.prepare('UPDATE roots SET last_scan_id = ? WHERE id = ?').run(scanId, rootId);
     },
 
+    setRootVolume(rootId, volume) {
+      db.prepare(
+        `UPDATE roots SET status = @status, volume_uuid = @volumeUuid, volume_label = @volumeLabel,
+                          fstype = @fstype, mount_point = @mountPoint, is_mount_point = @isMountPoint,
+                          identity_mode = @identityMode, last_online_at = @lastOnlineAt
+         WHERE id = @rootId`,
+      ).run({
+        rootId,
+        ...volume,
+        isMountPoint: volume.isMountPoint === null ? null : Number(volume.isMountPoint),
+      });
+    },
+
+    recordScanRoot(row) {
+      db.prepare(
+        `INSERT INTO scan_roots (scan_id, root_id, path, status, fstype)
+         VALUES (@scanId, @rootId, @path, @status, @fstype)
+         ON CONFLICT (scan_id, root_id) DO UPDATE SET
+           path = excluded.path, status = excluded.status, fstype = excluded.fstype`,
+      ).run(row);
+    },
+
     upsertDir(row) {
       insertDir.run(row);
       const found = db.prepare('SELECT id FROM dirs WHERE root_id = ? AND rel_path = ?').get(row.rootId, row.relPath) as
@@ -278,7 +348,10 @@ export function openStore(dataDir: string): CatalogueStore {
             continue;
           }
           const unchanged =
-            existing.dev === row.dev &&
+            // `dev` is deliberately absent: a USB drive gets a new device
+            // number every time it is plugged in, so comparing it across scans
+            // would re-hash a whole external volume on every run. Within one
+            // scan the scanner still compares it, to detect a mount boundary.
             existing.ino === row.ino &&
             existing.size === row.size &&
             existing.mtimeNs === row.mtimeNs;
