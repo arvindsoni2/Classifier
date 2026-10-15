@@ -1092,3 +1092,131 @@ twice under two names.
 The review's should-fix items are untouched. Two are visible above rather than
 fixed: the 87 metadata failures appear nowhere in the report (`0 errors`, empty
 `errors.csv`), and `metadata ok for 0 of 2370` hides them from the console too.
+
+---
+
+## Task 7 — Hardening
+
+One session. One commit: `fix(catalogue): safe opens, honest scan status and probe
+failures` (`68f624d`).
+
+**Tests:** 358 pass (323 before, +35). `pnpm typecheck`, `pnpm lint` and
+`pnpm test` all pass. Twenty mutations, each caught by the test that owns the rule.
+No new dependencies. No CLI run against a real root.
+
+This task closes should-fix items from both Phase 1 reviews: 1 and 8 from
+`phase-1-phase-2026-10-15.md`, and 1–4 and 6 from `phase-1-volumes-2026-10-15.md`.
+
+### 1. Safe opens
+
+`open.ts` is the one door every read of a root's contents goes through:
+`O_RDONLY | O_NOFOLLOW | O_NONBLOCK`, then `fstat` on the descriptor, refusing
+anything that is not a regular file. `scanner.ts`, `dedupe.ts` and
+`metadata/readfile.ts` all use it.
+
+This was a real hang, not a theoretical one: a file swapped for a FIFO between the
+directory listing and the open blocked the entire scan forever, with no output and
+no error. The FIFO tests run under a 15-second timeout and the mutation that drops
+`O_NONBLOCK` reproduces the hang — the first red run took 15 s twice, by timeout.
+Checking the descriptor rather than the path is deliberate: the thing inspected is
+the thing that was opened.
+
+### 2. No swallowed errors
+
+- `readHead` returns the failure instead of an empty buffer. An unreadable file was
+  previously catalogued as a file with no contents.
+- A directory whose listing failed protects its whole subtree from
+  `markMissingNotSeen`. One `EACCES` used to look exactly like a deleted directory.
+- The per-directory `try` no longer wraps store calls. A database failure aborts the
+  scan; it is not recorded as a per-file error row, which would have left a scan
+  marked `done` with figures it never stored.
+
+### 3. Scan status covers the whole pipeline
+
+`scan()` takes `stages` and runs them after the walk, inside the same `scans` row.
+The row stays `running` until the last stage returns, `finished_at` now covers
+hashing, bundles and metadata, and `failure_stage` names the stage that threw
+(`scans.failure_stage`, added by an additive `ALTER TABLE`). The CLI passes hash,
+bundles and metadata as stages rather than calling them itself.
+
+### 4. Subtree SQL
+
+`subtreeItemStats`, `setItemsBundleInSubtree` and `setBundlesParentInSubtree` use
+`substr(rel_path, 1, length(@relPath) + 1) = @relPath || '/'`. In `LIKE`, `_` is a
+single-character wildcard and ASCII case is ignored, so an archive `files/` claimed a
+sibling `Files/inner`, and `my_files/` claimed `myXfiles/inner`.
+
+The test lives in `store-subtree.test.ts` and builds its directories by hand. A
+fixture *tree* cannot express this: the pattern only ever matched sub-directories, so
+my first attempt — `files/`, `Files/` and `fileX/` side by side — passed before the
+fix and proved nothing. The fixture that actually collides needs a shared
+subdirectory name, which is why `files/inner` and `Files/inner` both exist.
+`itemsUnder` in the bundle tests was fixed the same way: it was the yardstick, and
+it had the same wildcard bug as the code.
+
+### 5. mtime tolerance by distance
+
+`|a − b| < 2 s`, not two-second buckets. Buckets called 5.9 s and 6.1 s different
+files whenever a boundary sat between them, re-hashing for a rounding artefact of
+FAT's clock. The tolerance is strict, symmetric, and still gated on size; inode-mode
+roots compare mtime exactly.
+
+### 6. A failed probe is not an offline drive
+
+`VolumeProbe` now returns `found | absent | failed` instead of
+`VolumeInfo | null`. `findmnt` missing, timing out, or printing something unreadable
+is `failed`: the root is skipped, its items are untouched, its volume facts are kept,
+it is **not** marked offline, one `PROBE_FAILED` error is recorded, and
+`scan_roots.status` carries `probe_failed` so `summary.md`, `summary.json` and
+`stats` all show it.
+
+This is the change with the widest blast radius: every probe fake in the suite moved
+to the new shape. `scan_roots.status` gained a third value, and since a `CHECK`
+constraint cannot be altered, `migrate.ts` now has the one migration that rebuilds a
+table rather than adding a column — transactional, and skipped when the table is
+absent or already widened.
+
+**One extra fix, found by the tests.** The probe's deadline killed the child but the
+promise only settled on `close`, which waits for every holder of stdout. A `findmnt`
+that had spawned a child of its own would hold the pipe open past the kill, so the
+deadline would not actually end the wait. `runFindmnt` now settles on the deadline
+itself. The regression test uses a fake `findmnt` that sleeps 30 s.
+
+### 7. MOUNT_BOUNDARY
+
+Now tested. Proving it needs a second filesystem and a test may not mount one, so
+the scanner takes an optional `deviceOf` seam, exactly as it takes `volumeProbe`.
+The default is `lstat`.
+
+### 8. Housekeeping
+
+- `config/catalogue.example.json` excludes `System Volume Information` and
+  `$RECYCLE.BIN`.
+- `findmnt` added to the plan's external-tools line.
+- `src/shared/zip.ts` gets its `Result` from a new `src/shared/result.ts` instead of
+  `../domain/contracts.js` (review should-fix 7). The codes are the reader's own and
+  are a subset of the domain's, so the two `Result`s stay assignable to each other
+  and existing callers keep compiling.
+- The two `every()` assertions in the bundle tests now assert length first. Writing
+  that first assertion caught my own wrong count immediately — the fixture had two
+  clips, not three — which is the reason the review asked for it.
+- `bundles.test.ts` (569) split into three files plus a shared `bundle-world.ts`;
+  `scanner.test.ts` (527) split into `scanner.test.ts` and `scanner-volume.test.ts`
+  plus a shared `scanner-world.ts`. Both are now under 400.
+
+### Files outside the task's list
+
+Forced by the work, not chosen: `src/catalogue/open.ts` and
+`src/catalogue/scan-root.ts` (the walk out of `scanner.ts`, which reached 518 lines
+and had to come apart to stay readable), `src/shared/result.ts`, and the test
+helpers and files listed in the diff. `report.test.ts` (434) and `metadata.test.ts`
+(425) are still over 400; they were not in this task's scope and are untouched.
+
+### Deferred
+
+- **The external-drive acceptance (plan Task 6 step 6).** Arvind deferred it on
+  2026-10-15: no drive available. Offline, unmounted-mount-point, volume-changed and
+  probe-failure paths are proven on fixtures only. Recorded in the plan and in the
+  spec's Phase 5 scope, which may not start until it passes.
+- **Task 8**, per scope: report wording, metadata outcome counts, encrypted PDFs,
+  large EPUBs, historical bundles.
