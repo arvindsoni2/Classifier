@@ -220,7 +220,33 @@ it('a missing configuration fails with a message, not a stack trace', () => {
     expect(line).toMatch(/7s elapsed/);
   });
 
-  it('an unknown verb and a bare invocation both explain themselves', () => {
+  it('--help shows the usage instead of complaining about a command', () => {
+  // `--help` is the first thing anyone types, and it arrives before any verb.
+  for (const args of [['--help'], ['-h'], ['scan', '--help'], ['--help', 'scan']]) {
+    const result = runCli(args);
+    expect(result.code).toBe(0);
+    expect(result.stdout).toMatch(/catalogue scan/);
+    expect(result.stderr).toBe('');
+  }
+});
+
+it('flags may come before the verb, and only one verb per run', () => {
+  const { configPath } = buildWorld('cli-flag-order');
+  // --config before the verb is how people type it in practice.
+  const scan = runCli(['--config', configPath, 'scan']);
+  expect(scan.code).toBe(0);
+  expect(scan.stdout).toMatch(/files in/);
+
+  const twoVerbs = runCli(['scan', 'report', '--config', configPath]);
+  expect(twoVerbs.code).toBe(2);
+  expect(twoVerbs.stderr).toMatch(/only one command/i);
+
+  const dangling = runCli(['scan', '--root']);
+  expect(dangling.code).toBe(2);
+  expect(dangling.stderr).toMatch(/--root needs a value/i);
+}, 120_000);
+
+it('an unknown verb and a bare invocation both explain themselves', () => {
     const noArgs = runCli([]);
     expect(noArgs.code).not.toBe(0);
     expect(noArgs.stdout + noArgs.stderr).toMatch(/scan|report|stats/i);

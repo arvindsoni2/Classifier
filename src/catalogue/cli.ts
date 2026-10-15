@@ -48,37 +48,58 @@ interface ParsedArgs {
 /** Thrown for a bad command line, as opposed to a bad configuration. */
 class UsageError extends Error {}
 
-/** Parses argv without a library: flags the plan names, and nothing else. */
+/** Flags that mean "show the usage", wherever they appear. */
+function isHelpFlag(arg: string): boolean {
+  return arg === '--help' || arg === '-h';
+}
+
+/**
+ * Parses argv without a library: flags the plan names, and nothing else.
+ *
+ * A verb is the first argument *that is not a flag*, so `catalogue --help` and
+ * `catalogue --config x scan` both work. Taking `argv[0]` as the verb
+ * unconditionally read `--help` as an unknown command, which is the first thing
+ * anyone types.
+ */
 export function parseArgs(argv: readonly string[]): ParsedArgs {
-  const parsed: ParsedArgs = { verb: argv[0] ?? '', roots: [], scanId: undefined, configPath: undefined };
-  for (let index = 1; index < argv.length; index += 1) {
+  const parsed: ParsedArgs = { verb: '', roots: [], scanId: undefined, configPath: undefined };
+  for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
+    if (arg === undefined) continue;
     const value = (): string => {
       const next = argv[index + 1];
       if (next === undefined) throw new UsageError(`${arg} needs a value`);
       index += 1;
       return next;
     };
-    switch (arg) {
-      case '--root':
-        parsed.roots.push(value());
-        break;
-      case '--scan': {
-        const raw = value();
-        if (!/^\d+$/.test(raw)) throw new UsageError(`--scan needs a scan id, not ${JSON.stringify(raw)}`);
-        parsed.scanId = Number.parseInt(raw, 10);
-        break;
-      }
-      case '--config':
-        parsed.configPath = value();
-        break;
-      case '--help':
-      case '-h':
-        parsed.verb = 'help';
-        break;
-      default:
-        throw new UsageError(`unknown option ${JSON.stringify(arg)}`);
+    if (isHelpFlag(arg)) {
+      // Asking for help wins outright, wherever it appears: `catalogue --help
+      // scan` and `catalogue scan --help` both mean "show me the usage".
+      return { ...parsed, verb: 'help' };
     }
+    if (arg.startsWith('-')) {
+      switch (arg) {
+        case '--root':
+          parsed.roots.push(value());
+          continue;
+        case '--scan': {
+          const raw = value();
+          if (!/^\d+$/.test(raw)) throw new UsageError(`--scan needs a scan id, not ${JSON.stringify(raw)}`);
+          parsed.scanId = Number.parseInt(raw, 10);
+          continue;
+        }
+        case '--config':
+          parsed.configPath = value();
+          continue;
+        default:
+          throw new UsageError(`unknown option ${JSON.stringify(arg)}`);
+      }
+    }
+    if (parsed.verb === '') {
+      parsed.verb = arg;
+      continue;
+    }
+    throw new UsageError(`unexpected argument ${JSON.stringify(arg)}; only one command per run`);
   }
   return parsed;
 }
