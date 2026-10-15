@@ -1294,8 +1294,7 @@ Phase 5 cannot start until it passes on real hardware.
 
 ## Task 8 — Report truth (Phase 1 close-out)
 
-Commit: `feat(catalogue): honest metadata outcomes, seeking ZIP reads and stable bundle history`
-(hash appended below once the commit exists).
+Commit: `1e01ddb` — `feat(catalogue): honest metadata outcomes, seeking ZIP reads and stable bundle history`.
 
 **Tests:** 377 pass, 1 skipped (378 total; 361 before, +17). `pnpm typecheck`, `pnpm lint` and
 `pnpm test` all pass. Fifteen mutation runs, all caught (one needed a stronger test first — see
