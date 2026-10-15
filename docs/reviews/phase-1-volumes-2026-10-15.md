@@ -86,3 +86,26 @@ catalogue. The real-data verdict comes after Arvind's next run, which must inclu
 - Read-only `sqlite3 -readonly` on the live catalogue: no case or wildcard collisions under the archive bundles;
   the schema has not been migrated yet.
 - Not run: any scan of real roots or the external drive (Arvind's: plan Task 6 steps 1–7).
+
+## Re-review: 23feb32 (fix) and 3eba1e1 (log)
+
+**Verdict: ready for Arvind's acceptance run.** The blocker is fixed. Nothing new blocks.
+
+- `report.ts` `readRoots` now builds the root list from `scan_roots`. An offline root shows its `present` items
+  and its last recorded `fstype`, and is labelled "offline, not scanned this run" in `summary.md`,
+  `summary.json` and `stats`. A scan with no `scan_roots` rows falls back to the old behaviour, so earlier
+  reports are unchanged.
+- The test in `volume.test.ts` covers acceptance step 6 directly. It checks the drive's file count before and
+  after unplugging, all three outputs, and the exact `stats` line for the drive. A bare `/offline/` match would
+  also have been satisfied by the fixture's own path, so that is the right assertion. The report test's pipe
+  bound moved from 6 to 7 parts because the root table went from 3 to 5 columns, which is legitimate.
+- The log hashes are corrected (`f97a2d2`, `da9284c`, `0806757`, Task 1b `7535e89`).
+- Nit, not a finding: an offline root counts `status = 'present'`, while an online root counts every
+  non-missing item, which includes `incomplete`. The two can differ by the number of partial downloads on the
+  drive.
+
+Checks: `pnpm build`, `pnpm typecheck`, `pnpm lint` clean; `pnpm test` 36 files, **323 passed**, at `3eba1e1`.
+Should-fix items 1–4 and 6–8 remain open, as agreed.
+
+Next is plan Task 6, Arvind's run: steps 1–7 with the external drive as a root. Add `System Volume Information`
+and `$RECYCLE.BIN` to `exclude` first if the drive is NTFS or exFAT.
