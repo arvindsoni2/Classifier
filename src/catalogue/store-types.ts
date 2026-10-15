@@ -14,7 +14,6 @@ export interface ScanTotals {
   filesSeen: number;
   dirsSeen: number;
   bytesSeen: number;
-  filesHashed: number;
   errors: number;
   symlinksSeen: number;
   /**
@@ -147,11 +146,14 @@ export interface CatalogueStore {
   upsertItems(rows: ItemRow[]): void;
   /** Rows are never deleted: present items this scan did not see become missing. */
   /**
-   * Retires items of `rootId` this scan did not see. Directories listed in
-   * `unlistableRelPaths`, and their subtrees, are left exactly as they were: an
-   * unreadable directory is not a deleted one.
+   * Retires items of `rootId` this scan did not see.
+   *
+   * Each path in `protectedRelPaths` and everything below it is left exactly as
+   * it was: the walk failed to read something, which is not evidence that its
+   * contents are gone. `''` means the root itself could not be listed, so nothing
+   * under it is retired at all.
    */
-  markMissingNotSeen(rootId: number, scanId: number, unlistableRelPaths?: readonly string[]): number;
+  markMissingNotSeen(rootId: number, scanId: number, protectedRelPaths?: readonly string[]): number;
   addErrors(rows: { scanId: number; rootId: number; relPath: string; code: string; message: string }[]): void;
   /** Persists a candidate's partial hash; the full hash stays untouched. */
   setItemPartialHash(rootId: number, relPath: string, partialHash: string): void;

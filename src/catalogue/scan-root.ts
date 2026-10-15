@@ -14,19 +14,21 @@
  *  - excluded and hidden names are not catalogued;
  *  - rows are written in batches, so memory does not grow with the tree;
  *  - unchanged items keep their hashes and unseen items become `missing` — except
- *    under a directory whose listing failed, which taught us nothing.
+ *    under anything this scan could not read, which taught us nothing;
+ *  - a file the walk could not read keeps its previous row too, unless the
+ *    failure was `ENOENT`: that is the one error meaning the file is really gone.
  *
  * Nothing in this module creates, moves, modifies or deletes anything inside a
  * root: files are opened read-only, for at most 16 bytes, through `openRegularFile`.
  */
 import { lstat } from 'node:fs/promises';
 import { join } from 'node:path';
+import { errorCode, messageOf } from '../shared/errors.js';
 import { type CatalogueConfig } from './config.js';
-import { detectKind, extensionOf, MAGIC_PREFIX_BYTES } from './kinds.js';
 import { listDirectory, type Listing } from './list-directory.js';
-import { openRegularFile } from './open.js';
+import { readFileEntry } from './scan-file.js';
 import { decideRoot, identityModeFor, type KnownRoot } from './volume.js';
-import type { CatalogueStore, DirRow, ItemRow, ItemStatus, ScanTotals } from './store.js';
+import type { CatalogueStore, DirRow, ItemRow, ScanTotals } from './store.js';
 import type { ScanHooks } from './scanner.js';
 
 export type RootOutcome = 'online' | 'offline' | 'probe_failed';
@@ -62,8 +64,6 @@ interface PendingDir {
 /** Rows are inserted in batches of this size (plan Task 1 rule 8). */
 const BATCH_ROWS = 1_000;
 
-const INCOMPLETE_EXTENSIONS: ReadonlySet<string> = new Set(['part', 'crdownload', 'download', 'tmp']);
-
 /**
  * A directory containing this file is a Python virtualenv and is not entered.
  *
@@ -73,39 +73,6 @@ const INCOMPLETE_EXTENSIONS: ReadonlySet<string> = new Set(['part', 'crdownload'
  * and by no ordinary directory, so one entry in a listing is enough.
  */
 const VIRTUALENV_MARKER = 'pyvenv.cfg';
-
-function statusFor(name: string): ItemStatus {
-  return INCOMPLETE_EXTENSIONS.has(extensionOf(name)) ? 'incomplete' : 'present';
-}
-
-/**
- * The head of a file, or the failure that stopped us reading it.
- *
- * A failure is returned rather than swallowed. The old version answered `null`
- * for every open error, which is indistinguishable from a file whose first
- * sixteen bytes really are empty — so an unreadable file was catalogued as an
- * ordinary empty one and the reason it was unreadable went nowhere.
- */
-type HeadResult = { ok: true; head: Buffer } | { ok: false; code: string; message: string };
-
-/** Reads at most `MAGIC_PREFIX_BYTES` from the head of a file. */
-async function readHead(absPath: string): Promise<HeadResult> {
-  let handle;
-  try {
-    handle = await openRegularFile(absPath);
-  } catch (error) {
-    return { ok: false, code: errorCode(error), message: messageOf(error) };
-  }
-  try {
-    const buffer = Buffer.alloc(MAGIC_PREFIX_BYTES);
-    const { bytesRead } = await handle.read(buffer, 0, MAGIC_PREFIX_BYTES, 0);
-    return { ok: true, head: buffer.subarray(0, bytesRead) };
-  } catch (error) {
-    return { ok: false, code: errorCode(error), message: messageOf(error) };
-  } finally {
-    await handle.close();
-  }
-}
 
 /**
  * Walks one root, recording directories and files, and returns its errors.
@@ -215,9 +182,10 @@ export async function scanRoot(
   const stack: PendingDir[] = [{ rootId, relPath: '', absPath: rootPath }];
   let itemBuffer: ItemRow[] = [];
   let errorBuffer: { scanId: number; rootId: number; relPath: string; code: string; message: string }[] = [];
-  /** Directories whose listing failed, so their items keep their previous state. */
-  const unlistableRelPaths: string[] = [];
+  /** Paths this scan could not read; their rows, and everything below, are kept. */
+  const protectedRelPaths: string[] = [];
   const deviceOf = hooks.deviceOf ?? deviceByLstat;
+  const listDirectoryFn = hooks.listDirectory ?? listDirectory;
 
   const flush = (): void => {
     if (itemBuffer.length > 0) {
@@ -237,7 +205,7 @@ export async function scanRoot(
 
     let listing: Listing;
     try {
-      listing = await listDirectory(current.absPath, config.exclude);
+      listing = await listDirectoryFn(current.absPath, config.exclude);
     } catch (error) {
       // An unreadable directory is recorded and the scan continues (rule 7).
       // Its rel_path is remembered so its items are not retired below: we never
@@ -250,7 +218,7 @@ export async function scanRoot(
         message: messageOf(error),
       });
       totals.errors += 1;
-      unlistableRelPaths.push(rel);
+      protectedRelPaths.push(rel);
       continue;
     }
     totals.symlinksSeen += listing.symlinks;
@@ -282,7 +250,7 @@ export async function scanRoot(
         message: messageOf(error),
       });
       totals.errors += 1;
-      unlistableRelPaths.push(rel);
+      protectedRelPaths.push(rel);
       continue;
     }
 
@@ -314,7 +282,7 @@ export async function scanRoot(
       } catch (error) {
         errorBuffer.push({ scanId, rootId, relPath: childRel, code: errorCode(error), message: messageOf(error) });
         totals.errors += 1;
-        unlistableRelPaths.push(childRel);
+        protectedRelPaths.push(childRel);
         continue;
       }
       if (childDev !== rootDev) {
@@ -334,40 +302,23 @@ export async function scanRoot(
 
     for (const name of listing.files) {
       const childRel = rel === '' ? name : `${rel}/${name}`;
-      const childAbs = join(current.absPath, name);
-      let stat;
-      try {
-        stat = await lstat(childAbs, { bigint: true });
-      } catch (error) {
-        errorBuffer.push({ scanId, rootId, relPath: childRel, code: errorCode(error), message: messageOf(error) });
-        totals.errors += 1;
+      const entry = await readFileEntry(
+        { rootId, scanId, dirId, rel, name, dirAbsPath: current.absPath },
+        hooks.openFile,
+      );
+      if (entry.ok) {
+        itemBuffer.push(entry.item);
+        totals.filesSeen += 1;
+        totals.bytesSeen += entry.item.size;
         continue;
       }
-      const head = await readHead(childAbs);
-      if (!head.ok) {
-        // Recorded, and nothing recorded as an item: a file we could not read is
-        // not a file with no contents.
-        errorBuffer.push({ scanId, rootId, relPath: childRel, code: head.code, message: head.message });
-        totals.errors += 1;
-        continue;
-      }
-      itemBuffer.push({
-        rootId,
-        relPath: childRel,
-        dirId,
-        name,
-        ext: extensionOf(name),
-        kind: detectKind(name, head.head),
-        size: Number(stat.size),
-        mtimeNs: stat.mtimeNs.toString(),
-        dev: stat.dev.toString(),
-        ino: stat.ino.toString(),
-        nlink: Number(stat.nlink),
-        status: statusFor(name),
-        scanId,
-      });
-      totals.filesSeen += 1;
-      totals.bytesSeen += Number(stat.size);
+      // Recorded, and nothing recorded as an item: a file we could not read is
+      // not a file with no contents. Unless the failure was `ENOENT` — the one
+      // code that means the file is really gone — its existing row is kept, so
+      // one `EACCES` does not look exactly like a deletion.
+      errorBuffer.push({ scanId, rootId, relPath: childRel, code: entry.code, message: entry.message });
+      totals.errors += 1;
+      if (entry.protect) protectedRelPaths.push(childRel);
     }
 
     if (itemBuffer.length >= BATCH_ROWS || errorBuffer.length >= BATCH_ROWS) flush();
@@ -376,22 +327,13 @@ export async function scanRoot(
   flush();
   // Only a root that was actually walked may retire its unseen items. The
   // offline path returns before reaching here, which is what stops an unplugged
-  // drive from marking everything it holds as missing. Directories whose listing
-  // failed are excluded too: we never saw inside them, so their items are not
-  // evidence of anything and stay as they were.
-  store.markMissingNotSeen(rootId, scanId, unlistableRelPaths);
+  // drive from marking everything it holds as missing. Anything this scan could
+  // not read is excluded too: we never saw inside it (or inside the root at all),
+  // so its items are not evidence of anything and stay as they were.
+  store.markMissingNotSeen(rootId, scanId, protectedRelPaths);
   store.setRootLastScan(rootId, scanId);
   return 'online';
 }
 
-/** Best-effort error classification; the message is kept verbatim. */
-function errorCode(error: unknown): string {
-  const code = (error as { code?: unknown }).code;
-  return typeof code === 'string' ? code : 'UNKNOWN';
-}
 
-function messageOf(error: unknown): string {
-  const message = (error as { message?: unknown }).message;
-  return typeof message === 'string' ? message : String(error);
-}
 

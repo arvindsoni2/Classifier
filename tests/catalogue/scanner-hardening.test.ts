@@ -23,7 +23,9 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { loadConfig } from '../../src/catalogue/config.js';
 import { computeHashes } from '../../src/catalogue/dedupe.js';
+import { listDirectory } from '../../src/catalogue/list-directory.js';
 import { MAX_EXTRACTOR_INPUT_BYTES, readFileBounded } from '../../src/catalogue/metadata/readfile.js';
+import { openRegularFile } from '../../src/catalogue/open.js';
 import { scan, type ScanDirectoryContext } from '../../src/catalogue/scanner.js';
 import { openStore, type CatalogueStore } from '../../src/catalogue/store.js';
 import { ext4Probe, makeTree, type Fixture } from './fixtures.js';
@@ -77,6 +79,21 @@ function itemPaths(store: CatalogueStore): string[] {
     rel_path: string;
   }[];
   return rows.map((row) => row.rel_path);
+}
+
+/** Everything a rescan must not change about a row it could not read. */
+interface ItemSnapshot {
+  rel_path: string;
+  status: string;
+  partial_hash: string | null;
+  sha256: string | null;
+  last_seen_scan: number;
+}
+
+function itemSnapshot(store: CatalogueStore): ItemSnapshot[] {
+  return store.db
+    .prepare('SELECT rel_path, status, partial_hash, sha256, last_seen_scan FROM items ORDER BY rel_path')
+    .all() as ItemSnapshot[];
 }
 
 /** Replaces `name` inside `dir` with something that is not a regular file. */
@@ -221,6 +238,65 @@ describe('no swallowed errors (Task 7 item 2)', () => {
       .prepare('SELECT rel_path, status, last_seen_scan FROM items ORDER BY rel_path')
       .all() as { rel_path: string; status: string; last_seen_scan: number }[];
     expect(rows.find((row) => row.rel_path === 'blocked/inside.txt')?.status).toBe('present');
+  });
+
+  // A rescan that could not read something must not retire it. `chmod` cannot
+  // express either failure below — root is not denied by mode bits — so the
+  // listing and the open are injected, the same seam style as `deviceOf`.
+  it('a root whose listing failed retires nothing, at the top or in its subtree', async () => {
+    const fx = fixture('unlistable-root', ['top.txt', 'a/x.txt', 'a/b/y.txt']);
+    const store = storeFor(fx);
+    const config = loadConfig(configFor(fx));
+    const first = await scan(config, store, { volumeProbe: ext4Probe() });
+    await computeHashes(store, first.scanId);
+    const before = itemSnapshot(store);
+    expect(before.map((row) => row.rel_path)).toEqual(['a/b/y.txt', 'a/x.txt', 'top.txt']);
+    expect(before.some((row) => row.partial_hash !== null || row.sha256 !== null)).toBe(true);
+
+    // The root itself cannot be listed: the walk saw nothing at all, so it has
+    // no standing to retire anything under it — not at the top level (the empty
+    // rel_path) and not in a subtree.
+    const second = await scan(config, store, {
+      volumeProbe: ext4Probe(),
+      listDirectory: async (absPath, exclude) => {
+        if (absPath === fx.root) throw Object.assign(new Error(`EACCES: ${absPath}`), { code: 'EACCES' });
+        return listDirectory(absPath, exclude);
+      },
+    });
+
+    const errors = errorsOf(store, second.scanId);
+    expect(errors.map((row) => [row.rel_path, row.code])).toEqual([['', 'EACCES']]);
+    // Every row is exactly as the first scan left it: present, and hashed where
+    // it was hashed.
+    expect(itemSnapshot(store)).toEqual(before);
+  });
+
+  it('a file that cannot be read keeps its row and is not retired', async () => {
+    const fx = fixture('unreadable-file-rescan', ['a/x.txt', 'keep.txt']);
+    const store = storeFor(fx);
+    const config = loadConfig(configFor(fx));
+    await scan(config, store, { volumeProbe: ext4Probe() });
+    const before = itemSnapshot(store);
+
+    const second = await scan(config, store, {
+      volumeProbe: ext4Probe(),
+      openFile: async (absPath) => {
+        if (absPath.endsWith(join('a', 'x.txt'))) {
+          throw Object.assign(new Error(`EACCES: ${absPath}`), { code: 'EACCES' });
+        }
+        return openRegularFile(absPath);
+      },
+    });
+
+    const errors = errorsOf(store, second.scanId);
+    expect(errors.map((row) => [row.rel_path, row.code])).toEqual([['a/x.txt', 'EACCES']]);
+    // One `EACCES` on one file is not a deletion: its row is untouched, hashes
+    // included, while the file the scan could read moved on.
+    const after = itemSnapshot(store);
+    expect(after.find((row) => row.rel_path === 'a/x.txt')).toEqual(
+      before.find((row) => row.rel_path === 'a/x.txt'),
+    );
+    expect(after.find((row) => row.rel_path === 'keep.txt')?.last_seen_scan).toBe(second.scanId);
   });
 
   it('a database failure fails the scan instead of being recorded as a scan error', async () => {

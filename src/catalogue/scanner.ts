@@ -11,7 +11,9 @@
  * anything inside a root: files are opened read-only for at most 16 bytes.
  */
 import { type CatalogueConfig } from './config.js';
+import type { Listing } from './list-directory.js';
 import { scanRoot } from './scan-root.js';
+import type { OpenFile } from './scan-file.js';
 import type { CatalogueStore, ScanTotals } from './store.js';
 import type { VolumeProbe } from './volume.js';
 
@@ -77,6 +79,18 @@ export interface ScanHooks {
    * needs a second filesystem, and a test may not mount one.
    */
   deviceOf?: (absPath: string) => Promise<bigint>;
+  /**
+   * Reads one directory's entries. Injectable because `chmod 000` does not deny
+   * root, so permissions alone cannot make a directory unlistable in a test that
+   * must also pass as root.
+   */
+  listDirectory?: (absPath: string, exclude: readonly string[]) => Promise<Listing>;
+  /**
+   * Opens one file read-only for the walk's head read. Injectable for the same
+   * reason as `listDirectory`: a test needs a single file to fail with `EACCES`
+   * even when it runs as root.
+   */
+  openFile?: OpenFile;
 }
 
 /**
@@ -101,7 +115,6 @@ export async function scan(
     filesSeen: 0,
     dirsSeen: 0,
     bytesSeen: 0,
-    filesHashed: 0,
     errors: 0,
     symlinksSeen: 0,
     bundlesSeen: 0,

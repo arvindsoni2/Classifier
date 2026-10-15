@@ -10,10 +10,12 @@
  * `running` until the last stage returns, records one elapsed time for all of it,
  * and an exception anywhere leaves it `failed` naming the stage that threw.
  */
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { loadConfig } from '../../src/catalogue/config.js';
+import { computeHashes } from '../../src/catalogue/dedupe.js';
+import { writeReport } from '../../src/catalogue/report.js';
 import { scan } from '../../src/catalogue/scanner.js';
 import { openStore, type CatalogueStore } from '../../src/catalogue/store.js';
 import { ext4Probe, makeTree, type Fixture } from './fixtures.js';
@@ -54,6 +56,20 @@ function scanRow(store: CatalogueStore, scanId: number): ScanRow {
   return store.db
     .prepare('SELECT status, started_at, finished_at, failure_stage FROM scans WHERE id = ?')
     .get(scanId) as ScanRow;
+}
+
+function filesHashedOf(store: CatalogueStore, scanId: number): number {
+  return (
+    store.db.prepare('SELECT files_hashed FROM scans WHERE id = ?').get(scanId) as {
+      files_hashed: number;
+    }
+  ).files_hashed;
+}
+
+/** The rendered `summary.md` for a scan, read back from disk. */
+function summaryMd(store: CatalogueStore, scanId: number, dataDir: string): string {
+  const report = writeReport(store, scanId, dataDir);
+  return readFileSync(join(report.dir, 'summary.md'), 'utf8');
 }
 
 describe('scan status covers the whole pipeline (Task 7 item 3)', () => {
@@ -177,5 +193,30 @@ describe('scan status covers the whole pipeline (Task 7 item 3)', () => {
     const result = await scan(loadConfig(configPath), store, { volumeProbe: ext4Probe() });
     expect(scanRow(store, result.scanId).status).toBe('done');
     expect(scanRow(store, result.scanId).failure_stage).toBeNull();
+  });
+
+  // The hash stage is the only writer of `files_hashed`. The walk never counts
+  // hashes, so a scan that finishes after its stages must not overwrite the
+  // hash stage's figure with the walk's zero — which is what it did once the
+  // stages moved inside the scan row (Task 7 follow-up).
+  it('files_hashed is the hash stage\'s count, and the scan closing does not erase it', async () => {
+    const { fixture, store, configPath } = harness('files-hashed', []);
+    const dataDir = join(fixture.parent, 'data');
+    // Two files of equal size are hashing candidates; the third is not, so the
+    // hash stage reads two files and the walk reads none.
+    fixture.put('a.txt', 'aaaa\n');
+    fixture.put('b.txt', 'bbbb\n');
+    fixture.put('c.txt', 'a unique size\n');
+    const config = loadConfig(configPath);
+    const hashStage = { name: 'hash', run: (scanId: number) => computeHashes(store, scanId) };
+
+    const first = await scan(config, store, { volumeProbe: ext4Probe(), stages: [hashStage] });
+    expect(filesHashedOf(store, first.scanId)).toBe(2);
+    expect(summaryMd(store, first.scanId, dataDir)).toContain('Files hashed: 2.');
+
+    // A rescan finds nothing that needs hashing: 0, not the previous scan's 2.
+    const second = await scan(config, store, { volumeProbe: ext4Probe(), stages: [hashStage] });
+    expect(filesHashedOf(store, second.scanId)).toBe(0);
+    expect(summaryMd(store, second.scanId, dataDir)).toContain('Files hashed: 0.');
   });
 });

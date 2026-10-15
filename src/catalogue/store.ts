@@ -109,7 +109,7 @@ export function openStore(dataDir: string): CatalogueStore {
   // it goes with the hashes. Rows are deleted only from the catalogue.
   const dropMetadata = db.prepare('DELETE FROM metadata WHERE item_id = ?');
   const markMissingBase = `UPDATE items SET status = 'missing'
-       WHERE root_id = ? AND status <> 'missing' AND last_seen_scan <> ?`;
+       WHERE root_id = @rootId AND status <> 'missing' AND last_seen_scan <> @scanId`;
   const markMissing = db.prepare(markMissingBase);
   const selectRootVolume = db.prepare(
     'SELECT volume_uuid AS volumeUuid, fstype, is_mount_point AS isMountPoint FROM roots WHERE path = ?',
@@ -141,9 +141,13 @@ export function openStore(dataDir: string): CatalogueStore {
     },
 
     finishScan(scanId, status, finishedAt, totals, failureStage: string | null = null) {
+      // `files_hashed` is deliberately absent: the walk never counts hashes, and
+      // the hash stage is the only thing that can — it owns the column through
+      // `setFilesHashed`. Writing it here would overwrite the stage's figure
+      // with the walk's zero, which is what the scan row used to record.
       db.prepare(
         `UPDATE scans SET finished_at = ?, status = ?, failure_stage = ?, files_seen = ?, dirs_seen = ?,
-                          bytes_seen = ?, files_hashed = ?, errors = ? WHERE id = ?`,
+                          bytes_seen = ?, errors = ? WHERE id = ?`,
       ).run(
         finishedAt,
         status,
@@ -151,7 +155,6 @@ export function openStore(dataDir: string): CatalogueStore {
         totals.filesSeen,
         totals.dirsSeen,
         totals.bytesSeen,
-        totals.filesHashed,
         totals.errors,
         scanId,
       );
@@ -287,30 +290,33 @@ export function openStore(dataDir: string): CatalogueStore {
       write(rows);
     },
 
-    markMissingNotSeen(rootId, scanId, unlistableRelPaths = []) {
-      if (unlistableRelPaths.length === 0) return markMissing.run(rootId, scanId).changes;
+    markMissingNotSeen(rootId, scanId, protectedRelPaths = []) {
+      if (protectedRelPaths.length === 0) return markMissing.run({ rootId, scanId }).changes;
 
-      // A directory whose listing failed protects its whole subtree. Those items
-      // keep their previous status and their hashes: a scan that could not read a
-      // directory has learned nothing about what is inside it, and marking them
-      // `missing` is how one `EACCES` used to look exactly like a deletion.
-      const idOf = db.prepare('SELECT id FROM dirs WHERE root_id = ? AND rel_path = ?');
-      const idsUnder = db.prepare(
-        'SELECT id FROM dirs WHERE root_id = ? AND substr(rel_path, 1, length(?) + 1) = ? || \'/\'',
-      );
-      const protectedIds = new Set<number>();
-      for (const relPath of unlistableRelPaths) {
-        for (const row of idOf.all(rootId, relPath) as { id: number }[]) protectedIds.add(row.id);
-        for (const row of idsUnder.all(rootId, relPath, relPath) as { id: number }[]) protectedIds.add(row.id);
-      }
-      const ids = [...protectedIds];
-      const placeholders = ids.map(() => '?').join(', ');
+      // A protected path keeps its own row and its whole subtree: a scan that
+      // could not read something has learned nothing about what is under it, and
+      // marking those rows `missing` is how one `EACCES` used to look exactly
+      // like a deletion.
+      //
+      // `''` is the root itself. If its listing failed, the walk saw nothing at
+      // all, so it has no standing to retire any item of this root.
+      if (protectedRelPaths.includes('')) return 0;
+      // Matched by prefix over `items.rel_path` rather than by collecting the
+      // directory ids inside each protected subtree. One unreadable directory
+      // with thousands of subdirectories is therefore one parameter, not
+      // thousands, so a large protected subtree cannot exceed SQLite's variable
+      // limit. `json_each` turns the list into rows, so the statement is built
+      // once.
       return db
         .prepare(
           `${markMissingBase}
-           AND (dir_id IS NULL OR dir_id NOT IN (${placeholders}))`,
+           AND NOT EXISTS (
+             SELECT 1 FROM json_each(@protected) AS p
+             WHERE items.rel_path = p.value
+                OR substr(items.rel_path, 1, length(p.value) + 1) = p.value || '/'
+           )`,
         )
-        .run(rootId, scanId, ...ids).changes;
+        .run({ rootId, scanId, protected: JSON.stringify(protectedRelPaths) }).changes;
     },
 
     addErrors(rows) {

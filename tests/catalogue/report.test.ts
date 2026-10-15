@@ -390,7 +390,6 @@ it('writes the report under the data directory and nothing inside the root', asy
       filesSeen: 1,
       dirsSeen: 0,
       bytesSeen: 2,
-      filesHashed: 0,
       errors: 0,
       symlinksSeen: 0,
       bundlesSeen: 0,
