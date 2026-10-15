@@ -1,25 +1,32 @@
 /**
- * Read-only recursive catalogue scanner (spec §7.1, plan Task 1).
+ * The scan's lifecycle: one scan row, the walk, then the caller's pipeline
+ * stages (spec §7.1, plan Task 1).
  *
- * Every rule here exists to make the walk safe and honest:
- *  - iterative, so a deep tree cannot overflow the stack;
- *  - symlinks are counted and never followed, never recorded;
- *  - a directory on another device is an error row, never entered;
- *  - sockets, FIFOs and devices are skipped;
- *  - excluded and hidden names are not catalogued;
- *  - rows are written in batches, so memory does not grow with the tree;
- *  - unchanged items keep their hashes and unseen items become `missing`.
+ * The walk itself lives in `scan-root.ts`, because *where the scanner goes next*
+ * and *when a scan counts as finished* are different questions. What is here is
+ * the part that spans both: the row that stays open across every stage, and the
+ * rule that it closes as `done` only when all of them have finished.
  *
- * Nothing in this module creates, moves, modifies or deletes anything inside a
- * root: files are opened read-only for at most 16 bytes.
+ * Nothing in this module or the one it calls creates, moves, modifies or deletes
+ * anything inside a root: files are opened read-only for at most 16 bytes.
  */
-import { open, lstat } from 'node:fs/promises';
-import { join } from 'node:path';
 import { type CatalogueConfig } from './config.js';
-import { detectKind, extensionOf, MAGIC_PREFIX_BYTES } from './kinds.js';
-import { listDirectory, type Listing } from './list-directory.js';
-import { decideRoot, identityModeFor, type KnownRoot, type VolumeProbe } from './volume.js';
-import type { CatalogueStore, DirRow, ItemRow, ItemStatus, ScanTotals } from './store.js';
+import { scanRoot } from './scan-root.js';
+import type { CatalogueStore, ScanTotals } from './store.js';
+import type { VolumeProbe } from './volume.js';
+
+/**
+ * One stage of the scan pipeline, run after the walk and inside the same scan
+ * row: hashing, bundle detection, metadata extraction.
+ *
+ * Stages run in order and the row stays `running` until the last one returns. A
+ * stage that throws fails the scan and is named in `scans.failure_stage`.
+ */
+export interface ScanStage {
+  /** Recorded as `failure_stage` if this stage throws. */
+  name: string;
+  run: (scanId: number) => Promise<unknown> | unknown;
+}
 
 export interface ScanResult {
   scanId: number;
@@ -29,8 +36,12 @@ export interface ScanResult {
   rootsOnline: number;
   /** Roots a probe reported missing: skipped, with no item touched. */
   rootsOffline: number;
+  /** Roots a probe could not answer for: skipped, with no item touched. */
+  rootsProbeFailed: number;
   totals: ScanTotals;
   elapsedMs: number;
+  /** What each stage returned, keyed by stage name, for the caller to print. */
+  stageResults: ReadonlyMap<string, unknown>;
 }
 
 /** One directory as the scanner sees it, handed to `onDirectory`. */
@@ -57,308 +68,26 @@ export type { VolumeInfo, VolumeProbe } from './volume.js';
 export interface ScanHooks {
   onDirectory?: (dir: ScanDirectoryContext) => boolean | void;
   volumeProbe?: VolumeProbe;
+  /**
+   * Runs after the walk, inside this scan's row: hashing, bundles, metadata.
+   */
+  stages?: readonly ScanStage[];
+  /**
+   * The device number a path sits on. Injectable because proving `MOUNT_BOUNDARY`
+   * needs a second filesystem, and a test may not mount one.
+   */
+  deviceOf?: (absPath: string) => Promise<bigint>;
 }
-
-/** The volume facts a previous scan recorded for a root, if it has any. */
-function knownVolume(store: CatalogueStore, rootPath: string): KnownRoot | null {
-  const known = store.rootVolumeByPath(rootPath);
-  if (known === null) return null;
-  return {
-    volumeUuid: known.volumeUuid,
-    fstype: known.fstype,
-    // SQLite has no boolean; 1 is how a true is stored.
-    isMountPoint: known.isMountPoint === null ? null : known.isMountPoint === 1,
-  };
-}
-
-/** How a volume is named in a message: its uuid when it has one, else its type. */
-function describeVolume(uuid: string | null, fstype: string | null): string {
-  return uuid ?? fstype ?? 'unknown';
-}
-
-interface PendingDir {
-  rootId: number;
-  relPath: string;
-  absPath: string;
-}
-
-/** Rows are inserted in batches of this size (plan Task 1 rule 8). */
-const BATCH_ROWS = 1_000;
-
-const INCOMPLETE_EXTENSIONS: ReadonlySet<string> = new Set(['part', 'crdownload', 'download', 'tmp']);
 
 /**
- * A directory containing this file is a Python virtualenv and is not entered.
+ * Scans every configured root, then runs the caller's pipeline stages, all inside
+ * one scan row. Read-only on the roots; the only writes are to the catalogue
+ * database.
  *
- * Content, not name, is the signal: `.venv` and `venv` are already in the
- * default exclude list, and the environments that actually exist are named
- * `env1`, `myenv`, `pytorch_env`. `pyvenv.cfg` is written by `python -m venv`
- * and by no ordinary directory, so one entry in a listing is enough.
- */
-const VIRTUALENV_MARKER = 'pyvenv.cfg';
-
-function statusFor(name: string): ItemStatus {
-  return INCOMPLETE_EXTENSIONS.has(extensionOf(name)) ? 'incomplete' : 'present';
-}
-
-/** Reads at most `MAGIC_PREFIX_BYTES` from the head of a file. */
-async function readHead(absPath: string): Promise<Buffer | null> {
-  let handle;
-  try {
-    handle = await open(absPath, 'r');
-    const buffer = Buffer.alloc(MAGIC_PREFIX_BYTES);
-    const { bytesRead } = await handle.read(buffer, 0, MAGIC_PREFIX_BYTES, 0);
-    return buffer.subarray(0, bytesRead);
-  } catch {
-    // Unreadable at open time: the caller's lstat error path already recorded it.
-    return null;
-  } finally {
-    await handle?.close();
-  }
-}
-
-/**
- * Walks one root, recording directories and files, and returns its errors.
- * Returns the root's status: `offline` when a probe says the path is not there,
- * in which case nothing below was touched.
- */
-async function scanRoot(
-  config: CatalogueConfig,
-  store: CatalogueStore,
-  rootPath: string,
-  scanId: number,
-  totals: ScanTotals,
-  hooks: ScanHooks,
-): Promise<'online' | 'offline'> {
-  const startedAt = new Date().toISOString();
-
-  // Without a probe nothing is known about the volume, and the scan behaves
-  // exactly as it did before volumes existed: every root is walked, nothing is
-  // retired. The CLI supplies the real probe (Task 1b); tests supply a fake.
-  const decision =
-    hooks.volumeProbe === undefined
-      ? null
-      : decideRoot(rootPath, await hooks.volumeProbe(rootPath), knownVolume(store, rootPath));
-
-  // Offline: the drive is not there, or its mount point has gone. It is recorded
-  // and skipped without touching a single item — an absent drive is not a
-  // deleted directory, and retiring its files would be the most destructive
-  // thing this scan could do. Its volume facts are kept, so a different drive
-  // turned up at the same path is still recognised as a different volume.
-  if (decision?.kind === 'offline') {
-    const offlineId = store.upsertRoot(rootPath, '0', '0', startedAt, scanId);
-    store.markRootOffline(offlineId);
-    store.recordScanRoot({ scanId, rootId: offlineId, path: rootPath, status: 'offline', fstype: null });
-    store.setRootLastScan(offlineId, scanId);
-    return 'offline';
-  }
-
-  const rootStat = await lstat(rootPath, { bigint: true });
-  if (!rootStat.isDirectory()) {
-    throw new Error(`root ${rootPath} is not a directory`);
-  }
-  const rootId = store.upsertRoot(
-    rootPath,
-    rootStat.dev.toString(),
-    rootStat.ino.toString(),
-    startedAt,
-    scanId,
-  );
-
-  const volume = decision?.kind === 'scan' || decision?.kind === 'retired' ? decision.current : null;
-  if (volume !== null) {
-    if (decision?.kind === 'retired') {
-      // A different volume is at this path: the drive was reformatted, or
-      // another one was plugged in. Everything the old volume held is retired
-      // with its hashes, because none of it can be trusted to still hash to
-      // what was recorded, and the change is on the record for the root.
-      const retired = store.retireRootItems(rootId);
-      store.addErrors([
-        {
-          scanId,
-          rootId,
-          relPath: rootPath,
-          code: 'VOLUME_CHANGED',
-          message:
-            `volume changed at this path: ${describeVolume(decision.previousUuid, decision.previousFstype)}` +
-            ` became ${describeVolume(volume.uuid, volume.fstype)}; ${retired} item(s) retired`,
-        },
-      ]);
-      totals.errors += 1;
-    }
-    store.setRootVolume(rootId, {
-      status: 'online',
-      volumeUuid: volume.uuid,
-      volumeLabel: volume.label,
-      fstype: volume.fstype,
-      mountPoint: volume.mountPoint,
-      isMountPoint: volume.mountPoint === rootPath,
-      identityMode: identityModeFor(volume.fstype),
-      lastOnlineAt: startedAt,
-    });
-    store.recordScanRoot({ scanId, rootId, path: rootPath, status: 'online', fstype: volume.fstype });
-  }
-  const rootDev = rootStat.dev;
-
-  const stack: PendingDir[] = [{ rootId, relPath: '', absPath: rootPath }];
-  let itemBuffer: ItemRow[] = [];
-  let errorBuffer: { scanId: number; rootId: number; relPath: string; code: string; message: string }[] = [];
-
-  const flush = (): void => {
-    if (itemBuffer.length > 0) {
-      store.upsertItems(itemBuffer);
-      itemBuffer = [];
-    }
-    if (errorBuffer.length > 0) {
-      store.addErrors(errorBuffer);
-      errorBuffer = [];
-    }
-  };
-
-  while (stack.length > 0) {
-    const current = stack.pop();
-    if (current === undefined) break;
-    const rel = current.relPath;
-
-    let listing: Listing;
-    try {
-      listing = await listDirectory(current.absPath, config.exclude);
-    } catch (error) {
-      // An unreadable directory is recorded and the scan continues (rule 7).
-      errorBuffer.push({
-        scanId,
-        rootId,
-        relPath: rel,
-        code: errorCode(error),
-        message: messageOf(error),
-      });
-      totals.errors += 1;
-      continue;
-    }
-    totals.symlinksSeen += listing.symlinks;
-
-    // A Python virtualenv is skipped the way an excluded name is: not entered,
-    // nothing recorded. It is recognised by its contents rather than its name,
-    // because `venv` and `.venv` are already in the exclude list and nobody
-    // calls their environment `venv` — on Arvind's roots these held 19,287 of
-    // 23,323 items, mostly headers and duplicated library files.
-    if (rel !== '' && listing.allNames.includes(VIRTUALENV_MARKER)) {
-      totals.virtualenvsSkipped += 1;
-      continue;
-    }
-
-    const boundary = hooks.onDirectory?.({ rootId, scanId, relPath: rel, absPath: current.absPath, names: listing.allNames }) === false;
-
-    try {
-      const stat = await lstat(current.absPath, { bigint: true });
-      const dirRow: DirRow = {
-        rootId,
-        relPath: rel,
-        dev: stat.dev.toString(),
-        ino: stat.ino.toString(),
-        fileCount: listing.fileCount,
-        dirCount: listing.dirCount,
-        lastSeenScan: scanId,
-      };
-      const dirId = store.upsertDir(dirRow);
-      totals.dirsSeen += 1;
-
-      if (boundary) {
-        // A bundle directory is recorded and counted, but nothing inside it is
-        // catalogued: no items, no child directories, no descent.
-        totals.bundlesSeen += 1;
-        continue;
-      }
-
-      for (const name of listing.dirs) {
-        const childRel = rel === '' ? name : `${rel}/${name}`;
-        const childAbs = join(current.absPath, name);
-        let stat;
-        try {
-          stat = await lstat(childAbs, { bigint: true });
-        } catch (error) {
-          errorBuffer.push({ scanId, rootId, relPath: childRel, code: errorCode(error), message: messageOf(error) });
-          totals.errors += 1;
-          continue;
-        }
-        if (stat.dev !== rootDev) {
-          // Spec §7.5: never cross a mount boundary below a root.
-          errorBuffer.push({
-            scanId,
-            rootId,
-            relPath: childRel,
-            code: 'MOUNT_BOUNDARY',
-            message: `device ${stat.dev} differs from root device ${rootDev}; not entered`,
-          });
-          totals.errors += 1;
-          continue;
-        }
-        stack.push({ rootId, relPath: childRel, absPath: childAbs });
-      }
-
-      for (const name of listing.files) {
-        const childRel = rel === '' ? name : `${rel}/${name}`;
-        const childAbs = join(current.absPath, name);
-        let stat;
-        try {
-          stat = await lstat(childAbs, { bigint: true });
-        } catch (error) {
-          errorBuffer.push({ scanId, rootId, relPath: childRel, code: errorCode(error), message: messageOf(error) });
-          totals.errors += 1;
-          continue;
-        }
-        const head = await readHead(childAbs);
-        itemBuffer.push({
-          rootId,
-          relPath: childRel,
-          dirId,
-          name,
-          ext: extensionOf(name),
-          kind: detectKind(name, head),
-          size: Number(stat.size),
-          mtimeNs: stat.mtimeNs.toString(),
-          dev: stat.dev.toString(),
-          ino: stat.ino.toString(),
-          nlink: Number(stat.nlink),
-          status: statusFor(name),
-          scanId,
-        });
-        totals.filesSeen += 1;
-        totals.bytesSeen += Number(stat.size);
-
-        if (itemBuffer.length >= BATCH_ROWS || errorBuffer.length >= BATCH_ROWS) flush();
-      }
-    } catch (error) {
-      errorBuffer.push({ scanId, rootId, relPath: rel, code: errorCode(error), message: messageOf(error) });
-      totals.errors += 1;
-    }
-
-    if (itemBuffer.length >= BATCH_ROWS || errorBuffer.length >= BATCH_ROWS) flush();
-  }
-
-  flush();
-  // Only a root that was actually walked may retire its unseen items. The
-  // offline path returns before reaching here, which is what stops an unplugged
-  // drive from marking everything it holds as missing.
-  store.markMissingNotSeen(rootId, scanId);
-  store.setRootLastScan(rootId, scanId);
-  return 'online';
-}
-
-/** Best-effort error classification; the message is kept verbatim. */
-function errorCode(error: unknown): string {
-  const code = (error as { code?: unknown }).code;
-  return typeof code === 'string' ? code : 'UNKNOWN';
-}
-
-function messageOf(error: unknown): string {
-  const message = (error as { message?: unknown }).message;
-  return typeof message === 'string' ? message : String(error);
-}
-
-/**
- * Scans every configured root into the catalogue. Read-only on the roots; the
- * only writes are to the catalogue database.
+ * The row is closed here rather than after the walk, because a scan is the whole
+ * pipeline: its `finished_at` covers hashing, bundles and metadata too, and a
+ * stage that throws leaves it `failed` naming the stage — never `done` with
+ * figures it never computed.
  */
 export async function scan(
   config: CatalogueConfig,
@@ -378,19 +107,42 @@ export async function scan(
     bundlesSeen: 0,
     virtualenvsSkipped: 0,
   };
+  const stageResults = new Map<string, unknown>();
 
+  let rootsOnline = 0;
+  let rootsOffline = 0;
+  let rootsProbeFailed = 0;
+  let failureStage: string | null = null;
+  /** The stage running when an exception escapes, or null during the walk. */
+  let lastStageStarted: string | null = null;
   try {
-    let rootsOnline = 0;
-    let rootsOffline = 0;
     for (const root of config.roots) {
       const status = await scanRoot(config, store, root, scanId, totals, hooks);
       if (status === 'online') rootsOnline += 1;
-      else rootsOffline += 1;
+      else if (status === 'offline') rootsOffline += 1;
+      else rootsProbeFailed += 1;
     }
-    store.finishScan(scanId, 'done', new Date().toISOString(), totals);
-    return { scanId, roots: config.roots.length, rootsOnline, rootsOffline, totals, elapsedMs: Date.now() - started };
+    for (const stage of hooks.stages ?? []) {
+      lastStageStarted = stage.name;
+      stageResults.set(stage.name, await stage.run(scanId));
+    }
+    lastStageStarted = null;
   } catch (error) {
-    store.finishScan(scanId, 'failed', new Date().toISOString(), totals);
+    // Whatever was running when the scan stopped: the walk, or a stage that had
+    // begun. Re-thrown, because a failed scan is not a scan.
+    failureStage = lastStageStarted ?? 'walk';
+    store.finishScan(scanId, 'failed', new Date().toISOString(), totals, failureStage);
     throw error;
   }
+  store.finishScan(scanId, 'done', new Date().toISOString(), totals, null);
+  return {
+    scanId,
+    roots: config.roots.length,
+    rootsOnline,
+    rootsOffline,
+    rootsProbeFailed,
+    totals,
+    elapsedMs: Date.now() - started,
+    stageResults,
+  };
 }

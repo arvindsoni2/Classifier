@@ -10,6 +10,7 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadConfig } from '../../src/catalogue/config.js';
 import { scan, type ScanResult, type VolumeInfo, type VolumeProbe } from '../../src/catalogue/scanner.js';
+import { absent, probeFailed } from '../../src/catalogue/volume.js';
 import { openStore, type CatalogueStore } from '../../src/catalogue/store.js';
 import { makeFixture, type Fixture } from './fixtures.js';
 
@@ -33,6 +34,12 @@ export interface World {
    * means the drive is mounted at its own root.
    */
   driveIs: (fs: DriveFs | null) => void;
+  /**
+   * Makes the drive's probe stop answering, the way a broken `findmnt` would.
+   * Distinct from `driveIs(null)`: the drive may well still be plugged in, and
+   * the catalogue must not conclude otherwise.
+   */
+  driveFails: (reason: string) => void;
   probe: VolumeProbe;
 }
 
@@ -48,6 +55,7 @@ export function world(label: string, initialDrive: DriveFs | null, cleanups: (()
   fixture.put('drive/notes.txt', 'on the external drive\n');
 
   let override: DriveFs | null = initialDrive;
+  let failure: string | null = null;
   const describe = (fs: DriveFs): VolumeInfo => ({ ...fs, mountPoint: fs.mountPoint ?? drive });
   return {
     fixture,
@@ -55,9 +63,16 @@ export function world(label: string, initialDrive: DriveFs | null, cleanups: (()
     root,
     drive,
     roots: [root, drive],
-    probe: async (path) =>
-      path === drive ? (override === null ? null : describe(override)) : { ...LAPTOP_FS, mountPoint: root },
-    driveIs: (fs) => (override = fs),
+    probe: async (path) => {
+      if (path !== drive) return { kind: 'found', volume: { ...LAPTOP_FS, mountPoint: root } };
+      if (failure !== null) return probeFailed(failure);
+      return override === null ? absent() : { kind: 'found', volume: describe(override) };
+    },
+    driveIs: (fs) => {
+      override = fs;
+      failure = null;
+    },
+    driveFails: (reason) => (failure = reason),
   };
 }
 

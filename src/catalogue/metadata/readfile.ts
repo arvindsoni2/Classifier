@@ -8,7 +8,7 @@
  * refused instead of exhausting memory, and a file that changes while it is
  * being read is refused rather than half-parsed.
  */
-import { open } from 'node:fs/promises';
+import { openRegularFile } from '../open.js';
 
 /** Default ceiling for a file an extractor may hold in memory. */
 export const MAX_EXTRACTOR_INPUT_BYTES = 64 * 1024 * 1024;
@@ -21,15 +21,19 @@ interface StatMoment {
 }
 
 /**
- * Reads `absPath` into memory, refusing anything above `maxBytes` and anything
- * that changes size or mtime between the two stats.
+ * Reads `absPath` into memory, refusing anything above `maxBytes`, anything that
+ * is not a regular file, and anything that changes size or mtime between the two
+ * stats.
+ *
+ * The open is `openRegularFile`, not a plain `'r'`: a FIFO swapped in after the
+ * scan listed it would otherwise block here forever rather than being refused.
  */
 export async function readFileBounded(
   absPath: string,
   maxBytes: number,
   signal: AbortSignal,
 ): Promise<Buffer> {
-  const handle = await open(absPath, 'r');
+  const handle = await openRegularFile(absPath);
   try {
     const before = await statOf(handle);
     if (before.size > BigInt(maxBytes)) {

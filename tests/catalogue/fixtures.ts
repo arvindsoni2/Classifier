@@ -9,6 +9,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { VolumeProbe } from '../../src/catalogue/scanner.js';
+import { absent, probeFailed } from '../../src/catalogue/volume.js';
 
 export interface Fixture {
   /** Absolute path of the fixture root (the scanned directory). */
@@ -76,13 +77,18 @@ export function makeTree(label: string, entries: string[]): Fixture {
  * exercised without depending on the machine's real filesystem.
  */
 export function ext4Probe(uuid = '11111111-2222-3333-4444-555555555555'): VolumeProbe {
-  return async (path: string) => ({ uuid, label: 'fixture', fstype: 'ext4', mountPoint: path });
+  return async (path: string) => ({ kind: 'found', volume: { uuid, label: 'fixture', fstype: 'ext4', mountPoint: path } });
 }
 
 /** A probe that reports `offlineRoots` as missing and everything else as ext4. */
 export function probeWithOfflineRoots(offlineRoots: readonly string[]): VolumeProbe {
   const base = ext4Probe();
-  return async (path: string) => (offlineRoots.includes(path) ? null : base(path));
+  return async (path: string) => (offlineRoots.includes(path) ? absent() : base(path));
+}
+
+/** A probe that cannot answer for any path, for the `probe_failed` rules. */
+export function failingProbe(reason: string): VolumeProbe {
+  return async () => probeFailed(reason);
 }
 
 export interface MultiRootFixture {

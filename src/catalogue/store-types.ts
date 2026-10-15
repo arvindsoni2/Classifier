@@ -87,6 +87,9 @@ export interface MetadataRow {
   extractedScan: number;
 }
 
+/** How a root went in one scan: walked, absent, or its probe could not answer. */
+export type ScanRootStatus = 'online' | 'offline' | 'probe_failed';
+
 /** What a root's volume looks like right now (plan Task 1, D31). */
 export interface RootVolume {
   status: 'online' | 'offline';
@@ -105,12 +108,22 @@ export interface CatalogueStore {
   /** Absolute path of the SQLite file. */
   readonly path: string;
   startScan(startedAt: string): number;
-  finishScan(scanId: number, status: ScanStatus, finishedAt: string, totals: ScanTotals): void;
+  /**
+   * Closes the scan row. `failureStage` names the part of the pipeline that
+   * threw (`walk`, or a stage's own name), and is null for a scan that finished.
+   */
+  finishScan(
+    scanId: number,
+    status: ScanStatus,
+    finishedAt: string,
+    totals: ScanTotals,
+    failureStage?: string | null,
+  ): void;
   upsertRoot(path: string, dev: string, ino: string, addedAt: string, scanId: number): number;
   /** Records what a probe found about a root's volume, online or not. */
   setRootVolume(rootId: number, volume: RootVolume): void;
-  /** Records that a scan covered this root, and whether it was online. */
-  recordScanRoot(row: { scanId: number; rootId: number; path: string; status: 'online' | 'offline'; fstype: string | null }): void;
+  /** Records that a scan covered this root, and how it went. */
+  recordScanRoot(row: { scanId: number; rootId: number; path: string; status: ScanRootStatus; fstype: string | null }): void;
   /** What previous scans recorded about a root's volume, or null for a new one. */
   rootVolumeByPath(path: string): { volumeUuid: string | null; fstype: string | null; isMountPoint: number | null } | null;
   /** Marks a root offline, keeping its volume facts and `last_online_at`. */
@@ -133,7 +146,12 @@ export interface CatalogueStore {
    */
   upsertItems(rows: ItemRow[]): void;
   /** Rows are never deleted: present items this scan did not see become missing. */
-  markMissingNotSeen(rootId: number, scanId: number): number;
+  /**
+   * Retires items of `rootId` this scan did not see. Directories listed in
+   * `unlistableRelPaths`, and their subtrees, are left exactly as they were: an
+   * unreadable directory is not a deleted one.
+   */
+  markMissingNotSeen(rootId: number, scanId: number, unlistableRelPaths?: readonly string[]): number;
   addErrors(rows: { scanId: number; rootId: number; relPath: string; code: string; message: string }[]): void;
   /** Persists a candidate's partial hash; the full hash stays untouched. */
   setItemPartialHash(rootId: number, relPath: string, partialHash: string): void;

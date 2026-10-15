@@ -21,13 +21,13 @@ export interface ReportSummary {
     errors: number;
   };
   /**
-   * Every root the scan covered, whether or not it was reachable. An offline
-   * root is listed with the figures from its last successful scan, and says so:
-   * an unplugged drive must never read as an empty one.
+   * Every root the scan covered, whether or not it was reachable. An offline or
+   * probe-failed root is listed with the figures from its last successful scan,
+   * and says so: an unplugged or unprobed drive must never read as an empty one.
    */
   roots: {
     path: string;
-    status: 'online' | 'offline';
+    status: 'online' | 'offline' | 'probe_failed';
     fstype: string | null;
     files: number;
     bytes: number;

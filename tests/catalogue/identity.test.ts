@@ -7,6 +7,7 @@
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { duplicateGroups } from '../../src/catalogue/dedupe.js';
+import { isUnchanged, type ItemIdentity } from '../../src/catalogue/identity.js';
 import { itemsOf, reupsert, rootRow, scanWorld, world } from './volume-world.js';
 
 const cleanups: (() => void)[] = [];
@@ -14,7 +15,44 @@ afterEach(() => {
   while (cleanups.length > 0) cleanups.pop()?.();
 });
 
+/** A path-mode row as the comparison sees it: same path, size and inode. */
+function pathModeRow(mtimeNs: string): ItemIdentity {
+  return { relPath: 'a/b.txt', size: 1000, mtimeNs, ino: '42' };
+}
+
 describe('file identity per filesystem (Phase 1 Task 1b)', () => {
+  describe('mtime tolerance on a path-mode root', () => {
+    // The two-second rule is about how far apart two timestamps are, not about
+    // which two-second window they each fall into. Times 0.2s apart used to be
+    // called changed whenever a bucket boundary sat between them, which re-hashes
+    // a file for a rounding artefact of the filesystem's own clock.
+    it('calls 5.9s and 6.1s the same file, across a bucket boundary', () => {
+      expect(isUnchanged('path', pathModeRow('5900000000'), pathModeRow('6100000000'))).toBe(true);
+    });
+
+    it('calls 4s and 6.5s a changed file, 2.5s apart', () => {
+      expect(isUnchanged('path', pathModeRow('4000000000'), pathModeRow('6500000000'))).toBe(false);
+    });
+
+    it('uses the distance, not the order, and tolerates just under two seconds', () => {
+      // The same two timestamps compared the other way round must agree, and the
+      // tolerance is strict: exactly two seconds apart is a change.
+      expect(isUnchanged('path', pathModeRow('6100000000'), pathModeRow('5900000000'))).toBe(true);
+      expect(isUnchanged('path', pathModeRow('5900000000'), pathModeRow('7900000000'))).toBe(false);
+    });
+
+    it('still requires the size to match', () => {
+      const bigger: ItemIdentity = { ...pathModeRow('5900000000'), size: 2000 };
+      expect(isUnchanged('path', pathModeRow('5900000000'), bigger)).toBe(false);
+    });
+
+    it('an inode-mode root compares mtime exactly, with no tolerance at all', () => {
+      // The tolerance exists for FAT's two-second clock, not as a general
+      // allowance: on btrfs a one-nanosecond difference is a rewrite.
+      expect(isUnchanged('inode', pathModeRow('5900000000'), pathModeRow('5900000001'))).toBe(false);
+    });
+  });
+
   describe('identity mode', () => {
     it('path mode ignores an inode that changed between scans', async () => {
       const w = world('path-mode-inode', { uuid: null, label: 'MYDRIVE', fstype: 'exfat' }, cleanups);

@@ -24,8 +24,17 @@
  */
 export type IdentityMode = 'inode' | 'path';
 
-/** Nanoseconds per two seconds — FAT's timestamp granularity. */
-const TWO_SECONDS_NS = 2_000_000_000n;
+/**
+ * How far apart two timestamps may be and still be the same file, in
+ * nanoseconds. FAT-family filesystems store times with two-second granularity,
+ * so the same file reads back slightly different on every mount.
+ *
+ * The tolerance is a *distance*, not a bucket: truncating each timestamp into a
+ * two-second window calls 5.9 s and 6.1 s different files whenever a boundary
+ * falls between them, and re-hashes the file for an artefact of the clock.
+ * BigInt throughout: nanosecond timestamps exceed Number's safe range.
+ */
+const MTIME_TOLERANCE_NS = 2_000_000_000n;
 
 /** The fields identity is decided from. */
 export interface ItemIdentity {
@@ -35,13 +44,10 @@ export interface ItemIdentity {
   ino: string;
 }
 
-/**
- * An mtime truncated to the filesystem's two-second granularity, so a file
- * FAT reports one second apart from the last scan is still the same file.
- * BigInt throughout: nanosecond timestamps exceed Number's safe range.
- */
-export function mtimeBucket(mtimeNs: string): string {
-  return (BigInt(mtimeNs) / TWO_SECONDS_NS).toString();
+/** Whether two nanosecond timestamps are less than the tolerance apart. */
+function mtimeWithinTolerance(previous: string, current: string): boolean {
+  const drift = BigInt(previous) - BigInt(current);
+  return (drift < 0n ? -drift : drift) < MTIME_TOLERANCE_NS;
 }
 
 /** inode|path: is this row the same file it was at the last scan? */
@@ -50,7 +56,7 @@ export function isUnchanged(mode: IdentityMode, previous: ItemIdentity, current:
   if (mode === 'path') {
     // The row was found by path already, so path identity is implied; size and
     // a coarse mtime are what is left to compare.
-    return mtimeBucket(previous.mtimeNs) === mtimeBucket(current.mtimeNs);
+    return mtimeWithinTolerance(previous.mtimeNs, current.mtimeNs);
   }
   return previous.ino === current.ino && previous.mtimeNs === current.mtimeNs;
 }

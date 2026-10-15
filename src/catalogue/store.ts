@@ -108,9 +108,9 @@ export function openStore(dataDir: string): CatalogueStore {
   // A changed file's extracted metadata describes bytes that no longer exist, so
   // it goes with the hashes. Rows are deleted only from the catalogue.
   const dropMetadata = db.prepare('DELETE FROM metadata WHERE item_id = ?');
-  const markMissing = db.prepare(
-    `UPDATE items SET status = 'missing' WHERE root_id = ? AND status <> 'missing' AND last_seen_scan <> ?`,
-  );
+  const markMissingBase = `UPDATE items SET status = 'missing'
+       WHERE root_id = ? AND status <> 'missing' AND last_seen_scan <> ?`;
+  const markMissing = db.prepare(markMissingBase);
   const selectRootVolume = db.prepare(
     'SELECT volume_uuid AS volumeUuid, fstype, is_mount_point AS isMountPoint FROM roots WHERE path = ?',
   );
@@ -140,13 +140,14 @@ export function openStore(dataDir: string): CatalogueStore {
       return Number(result.lastInsertRowid);
     },
 
-    finishScan(scanId, status, finishedAt, totals) {
+    finishScan(scanId, status, finishedAt, totals, failureStage: string | null = null) {
       db.prepare(
-        `UPDATE scans SET finished_at = ?, status = ?, files_seen = ?, dirs_seen = ?,
+        `UPDATE scans SET finished_at = ?, status = ?, failure_stage = ?, files_seen = ?, dirs_seen = ?,
                           bytes_seen = ?, files_hashed = ?, errors = ? WHERE id = ?`,
       ).run(
         finishedAt,
         status,
+        failureStage,
         totals.filesSeen,
         totals.dirsSeen,
         totals.bytesSeen,
@@ -286,8 +287,30 @@ export function openStore(dataDir: string): CatalogueStore {
       write(rows);
     },
 
-    markMissingNotSeen(rootId, scanId) {
-      return markMissing.run(rootId, scanId).changes;
+    markMissingNotSeen(rootId, scanId, unlistableRelPaths = []) {
+      if (unlistableRelPaths.length === 0) return markMissing.run(rootId, scanId).changes;
+
+      // A directory whose listing failed protects its whole subtree. Those items
+      // keep their previous status and their hashes: a scan that could not read a
+      // directory has learned nothing about what is inside it, and marking them
+      // `missing` is how one `EACCES` used to look exactly like a deletion.
+      const idOf = db.prepare('SELECT id FROM dirs WHERE root_id = ? AND rel_path = ?');
+      const idsUnder = db.prepare(
+        'SELECT id FROM dirs WHERE root_id = ? AND substr(rel_path, 1, length(?) + 1) = ? || \'/\'',
+      );
+      const protectedIds = new Set<number>();
+      for (const relPath of unlistableRelPaths) {
+        for (const row of idOf.all(rootId, relPath) as { id: number }[]) protectedIds.add(row.id);
+        for (const row of idsUnder.all(rootId, relPath, relPath) as { id: number }[]) protectedIds.add(row.id);
+      }
+      const ids = [...protectedIds];
+      const placeholders = ids.map(() => '?').join(', ');
+      return db
+        .prepare(
+          `${markMissingBase}
+           AND (dir_id IS NULL OR dir_id NOT IN (${placeholders}))`,
+        )
+        .run(rootId, scanId, ...ids).changes;
     },
 
     addErrors(rows) {

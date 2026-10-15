@@ -7,6 +7,8 @@
  * external drive that is unplugged, reformatted, or replaced.
  */
 import { readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { formatStats } from '../../src/catalogue/cli.js';
@@ -36,6 +38,34 @@ const cleanups: (() => void)[] = [];
 afterEach(() => {
   while (cleanups.length > 0) cleanups.pop()?.();
 });
+
+/**
+ * Runs `body` with a PATH containing nothing, then restores it.
+ *
+ * The probe spawns `findmnt` by name, so an empty PATH is exactly the situation
+ * of a machine without util-linux.
+ */
+async function withPath<T>(path: string, body: () => Promise<T>): Promise<T> {
+  const saved = process.env.PATH;
+  process.env.PATH = path;
+  try {
+    return await body();
+  } finally {
+    process.env.PATH = saved;
+  }
+}
+
+/** Runs `body` with a directory holding a fake `findmnt` first on PATH. */
+async function withFakeFindmnt<T>(script: string, body: () => Promise<T>): Promise<T> {
+  const dir = mkdtempSync(join(tmpdir(), 'catalogue-fake-findmnt-'));
+  const target = join(dir, 'findmnt');
+  writeFileSync(target, script, { mode: 0o755 });
+  try {
+    return await withPath(`${dir}:${process.env.PATH ?? ''}`, body);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
 
 describe('volume handling (Phase 1 Task 1b)', () => {
   describe('the findmnt probe', () => {
@@ -96,11 +126,45 @@ describe('volume handling (Phase 1 Task 1b)', () => {
       }
       const fx = makeFixture('probe-live');
       const found = await defaultVolumeProbe(fx.root);
-      expect(found).not.toBeNull();
-      expect(found?.fstype).not.toBe('');
-      expect(typeof found?.mountPoint).toBe('string');
-      // A path that does not exist has no filesystem.
-      expect(await defaultVolumeProbe(join(fx.parent, 'no-such-path-at-all'))).toBeNull();
+      expect(found.kind).toBe('found');
+      if (found.kind !== 'found') return;
+      expect(found.volume.fstype).not.toBe('');
+      expect(typeof found.volume.mountPoint).toBe('string');
+      // A path that does not exist is `absent`, which is a different answer from
+      // the probe failing: only the first is evidence that the drive is gone.
+      expect(await defaultVolumeProbe(join(fx.parent, 'no-such-path-at-all'))).toEqual({ kind: 'absent' });
+    });
+
+    // The three ways the *real* probe fails to answer. The scanner tests drive
+    // these through an injected probe, which proves what the scanner does with a
+    // failure; these prove the probe actually produces one, so the distinction
+    // from "absent" is not only ever exercised by a fake.
+    describe('the real probe when findmnt misbehaves', () => {
+      it('reports a failure when findmnt is not installed', async () => {
+        const fx = makeFixture('probe-missing-findmnt');
+        // Nothing on PATH named findmnt: the same failure as util-linux absent.
+        const result = await withPath('', () => defaultVolumeProbe(fx.root));
+        expect(result.kind).toBe('failed');
+        expect(result.kind === 'failed' && result.reason).toMatch(/could not be run/i);
+      });
+
+      it('reports a failure when findmnt prints something unreadable', async () => {
+        const fx = makeFixture('probe-junk-output');
+        const result = await withFakeFindmnt(
+          '#!/bin/sh\necho "findmnt: /run/media/x: must be superuser to perform this operation."\n',
+          () => defaultVolumeProbe(fx.root),
+        );
+        expect(result.kind).toBe('failed');
+        expect(result.kind === 'failed' && result.reason).toMatch(/could not be read/i);
+      });
+
+      it('reports a failure when findmnt never answers', async () => {
+        const fx = makeFixture('probe-hang');
+        // A findmnt that hangs: the deadline is the only thing that saves the scan.
+        const result = await withFakeFindmnt('#!/bin/sh\nsleep 30\n', () => defaultVolumeProbe(fx.root));
+        expect(result.kind).toBe('failed');
+        expect(result.kind === 'failed' && result.reason).toMatch(/did not answer/i);
+      }, 30_000);
     });
   });
 

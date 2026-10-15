@@ -26,11 +26,59 @@ const ADDED_ROOT_COLUMNS: readonly (readonly [string, string])[] = [
   ['last_online_at', 'TEXT'],
 ];
 
-export function migrateSchema(db: Database.Database): void {
+/** `scans` grew one column, for the same reason. */
+const ADDED_SCAN_COLUMNS: readonly (readonly [string, string])[] = [['failure_stage', 'TEXT']];
+
+/** Applies `ALTER TABLE ... ADD COLUMN` for a table, skipping columns it has. */
+function addMissingColumns(db: Database.Database, table: string, columns: readonly (readonly [string, string])[]): void {
   const present = new Set(
-    (db.prepare('PRAGMA table_info(roots)').all() as { name: string }[]).map((column) => column.name),
+    (db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((column) => column.name),
   );
-  for (const [name, type] of ADDED_ROOT_COLUMNS) {
-    if (!present.has(name)) db.exec(`ALTER TABLE roots ADD COLUMN ${name} ${type}`);
+  for (const [name, type] of columns) {
+    if (!present.has(name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${type}`);
   }
+}
+
+/**
+ * Widens `scan_roots.status` to allow `probe_failed`.
+ *
+ * A `CHECK` constraint cannot be altered, so this is the one migration here that
+ * rebuilds a table rather than adding a column. `scan_roots` has no foreign keys
+ * pointing at it, so the copy is the whole of it and the operation is
+ * transactional: either the old rows are all there under the new constraint, or
+ * nothing changed.
+ */
+function widenScanRootsStatus(db: Database.Database): void {
+  const supportsProbeFailed = db
+    .prepare("SELECT COUNT(*) AS n FROM scan_roots WHERE status = 'probe_failed'")
+    .get() as { n: number };
+  if (supportsProbeFailed.n > 0) return;
+  const sql = (db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'scan_roots'").get() as
+    | { sql: string }
+    | undefined)?.sql;
+  // A pre-volume catalogue has no `scan_roots` table at all; nothing to widen.
+  if (sql === undefined) return;
+  if (sql.includes('probe_failed')) return;
+  db.transaction(() => {
+    db.exec(
+      `CREATE TABLE scan_roots__widened (
+         scan_id   INTEGER NOT NULL REFERENCES scans(id),
+         root_id   INTEGER NOT NULL REFERENCES roots(id),
+         path      TEXT    NOT NULL,
+         status    TEXT    NOT NULL CHECK (status IN ('online', 'offline', 'probe_failed')),
+         fstype    TEXT,
+         PRIMARY KEY (scan_id, root_id)
+       );
+       INSERT INTO scan_roots__widened (scan_id, root_id, path, status, fstype)
+         SELECT scan_id, root_id, path, status, fstype FROM scan_roots;
+       DROP TABLE scan_roots;
+       ALTER TABLE scan_roots__widened RENAME TO scan_roots;`,
+    );
+  })();
+}
+
+export function migrateSchema(db: Database.Database): void {
+  addMissingColumns(db, 'roots', ADDED_ROOT_COLUMNS);
+  addMissingColumns(db, 'scans', ADDED_SCAN_COLUMNS);
+  widenScanRootsStatus(db);
 }

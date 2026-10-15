@@ -18,11 +18,11 @@
  *    hashes, detects bundles and extracts metadata, so the numbers it prints are
  *    the ones the report will contain.
  */
-import { bundleScanHook, detectBundles } from './bundles.js';
+import { bundleScanHook, detectBundles, type BundleDetection } from './bundles.js';
 import { loadConfig, validateConfig, ConfigError, type CatalogueConfig } from './config.js';
-import { computeHashes } from './dedupe.js';
+import { computeHashes, type HashRunSummary } from './dedupe.js';
 import { defaultVolumeProbe } from './volume.js';
-import { extractMetadata } from './metadata/index.js';
+import { extractMetadata, type MetadataRunSummary } from './metadata/index.js';
 import { latestFinishedScan, reportSummary, writeReport } from './report.js';
 import { rootStatusText } from './report-format.js';
 import { scan } from './scanner.js';
@@ -174,6 +174,9 @@ export async function runCatalogueCli(argv: readonly string[]): Promise<number> 
 
 async function runScan(config: CatalogueConfig): Promise<number> {
   const store = openStore(config.dataDir);
+  let hashes: HashRunSummary | null = null;
+  let bundles: BundleDetection[] = [];
+  let metadata: MetadataRunSummary | null = null;
   try {
     const progress = setInterval(() => {
       console.log(formatProgressLine(readProgress(store)));
@@ -182,17 +185,49 @@ async function runScan(config: CatalogueConfig): Promise<number> {
     progress.unref?.();
 
     const startedAt = Date.now();
+    // The whole pipeline is one scan: walk, then the stages below, all inside one
+    // `scans` row. The row is closed by `scan` itself, so its elapsed time covers
+    // hashing, bundles and metadata rather than the walk alone, and a failure in
+    // any of them is recorded as `failed` with the stage that threw.
+    //
     // The real probe: a root on an unplugged drive is reported offline and left
     // alone, and a drive replaced by another is recognised as a different volume.
     const result = await scan(config, store, {
       onDirectory: bundleScanHook(store),
       volumeProbe: defaultVolumeProbe,
+      stages: [
+        {
+          name: 'hash',
+          run: async (scanId) => {
+            hashes = await computeHashes(store, scanId);
+            return hashes;
+          },
+        },
+        {
+          name: 'bundles',
+          run: (scanId) => {
+            bundles = detectBundles(store, scanId);
+            return bundles.length;
+          },
+        },
+        {
+          name: 'metadata',
+          run: async (scanId) => {
+            metadata = await extractMetadata(store, scanId);
+            return metadata;
+          },
+        },
+      ],
     });
-    const hashes = await computeHashes(store, result.scanId);
-    const bundles = detectBundles(store, result.scanId);
-    const metadata = await extractMetadata(store, result.scanId);
     clearInterval(progress);
 
+    if (hashes === null || metadata === null) {
+      // Unreachable while the stages above are the only way to fill these in; a
+      // missing figure is reported as missing rather than printed as a zero.
+      throw new Error('scan finished without running its pipeline stages');
+    }
+    const hashSummary: HashRunSummary = hashes;
+    const metadataSummary: MetadataRunSummary = metadata;
     const elapsedSeconds = ((Date.now() - startedAt) / 1000).toFixed(1);
     console.log(
       [
@@ -203,8 +238,8 @@ async function runScan(config: CatalogueConfig): Promise<number> {
           : []),
         `${result.totals.filesSeen} files in ${result.totals.dirsSeen} directories, ` +
           `${formatBytes(result.totals.bytesSeen)}, ${result.totals.errors} errors.`,
-        `Hashed ${hashes.filesHashed} file(s); ${bundles.length} bundle(s); ` +
-          `metadata ok for ${metadata.ok} of ${metadata.candidates}.`,
+        `Hashed ${hashSummary.filesHashed} file(s); ${bundles.length} bundle(s); ` +
+          `metadata ok for ${metadataSummary.ok} of ${metadataSummary.candidates}.`,
         `Elapsed: ${elapsedSeconds}s`,
         `Catalogue: ${store.path}`,
       ].join('\n'),

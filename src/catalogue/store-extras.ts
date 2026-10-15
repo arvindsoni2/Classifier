@@ -36,7 +36,14 @@ export function setItemsBundle(db: Database.Database, dirId: number, bundleId: n
   return db.prepare('UPDATE items SET bundle_id = ? WHERE dir_id = ?').run(bundleId, dirId).changes;
 }
 
-/** Every non-missing item in a directory's whole subtree, whatever its bundle. */
+/**
+ * Every non-missing item in a directory's whole subtree, whatever its bundle.
+ *
+ * The prefix test is `substr`, never `LIKE`. In `LIKE` `_` stands for any one
+ * character and ASCII case is ignored, so `files/%` also matched `Files/inner`
+ * and `my_files/%` also matched `myXfiles/inner` — one archive claiming a
+ * sibling directory. A `substr` prefix cannot be reinterpreted.
+ */
 export function subtreeItemStats(
   db: Database.Database,
   rootId: number,
@@ -47,9 +54,10 @@ export function subtreeItemStats(
       `SELECT COUNT(*) AS files, COALESCE(SUM(i.size), 0) AS bytes
        FROM items i JOIN dirs d ON d.id = i.dir_id
        WHERE d.root_id = @rootId AND i.status <> 'missing'
-         AND (d.rel_path = @relPath OR d.rel_path LIKE @prefix)`,
+         AND (d.rel_path = @relPath
+              OR substr(d.rel_path, 1, length(@relPath) + 1) = @relPath || '/')`,
     )
-    .get({ rootId, relPath, prefix: `${relPath}/%` }) as { files: number; bytes: number };
+    .get({ rootId, relPath }) as { files: number; bytes: number };
 }
 
 /** Claims only the items in a subtree that no other bundle has claimed. */
@@ -64,9 +72,11 @@ export function setItemsBundleInSubtree(
       `UPDATE items SET bundle_id = @bundleId
        WHERE bundle_id IS NULL AND status <> 'missing' AND dir_id IN (
          SELECT id FROM dirs
-         WHERE root_id = @rootId AND (rel_path = @relPath OR rel_path LIKE @prefix))`,
+         WHERE root_id = @rootId
+           AND (rel_path = @relPath
+                OR substr(rel_path, 1, length(@relPath) + 1) = @relPath || '/'))`,
     )
-    .run({ rootId, relPath, prefix: `${relPath}/%`, bundleId }).changes;
+    .run({ rootId, relPath, bundleId }).changes;
 }
 
 /** Makes every bundle strictly inside a subtree a child of `bundleId`. */
@@ -80,9 +90,10 @@ export function setBundlesParentInSubtree(
     .prepare(
       `UPDATE bundles SET parent_bundle_id = @bundleId
        WHERE id <> @bundleId AND root_id = @rootId
-         AND rel_path LIKE @prefix AND (parent_bundle_id IS NULL OR parent_bundle_id = @bundleId)`,
+         AND substr(rel_path, 1, length(@relPath) + 1) = @relPath || '/'
+         AND (parent_bundle_id IS NULL OR parent_bundle_id = @bundleId)`,
     )
-    .run({ rootId, prefix: `${relPath}/%`, bundleId }).changes;
+    .run({ rootId, relPath, bundleId }).changes;
 }
 
 export function setDirBundle(db: Database.Database, dirId: number, bundleId: number): void {

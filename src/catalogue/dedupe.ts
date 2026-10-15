@@ -24,8 +24,9 @@
  * the files that actually need hashing this run), because writing rows while
  * a better-sqlite3 iterator is open is unsafe.
  */
-import { open, type FileHandle } from 'node:fs/promises';
+import { type FileHandle } from 'node:fs/promises';
 import { join } from 'node:path';
+import { openRegularFile } from './open.js';
 import { createHasher, type Hasher, type HashOutcome } from './hashing.js';
 import type { CatalogueStore } from './store.js';
 
@@ -100,7 +101,7 @@ async function withCandidateOpen(
   const absPath = join(row.root_path, row.rel_path);
   let handle: FileHandle | null = null;
   try {
-    handle = await open(absPath, 'r');
+    handle = await openRegularFile(absPath);
     return await run(handle);
   } catch (error) {
     const code = (error as { code?: unknown }).code;

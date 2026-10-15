@@ -29,14 +29,15 @@ CREATE TABLE IF NOT EXISTS roots (
   last_online_at   TEXT
 );
 
--- Which roots a given scan covered, and whether each was online. A report needs
--- this to say which drives were included: the same path can be scanned from a
--- different volume from one run to the next.
+-- Which roots a given scan covered, and how each one went. A report needs this to
+-- say which drives were included: the same path can be scanned from a different
+-- volume from one run to the next. `probe_failed` is not `offline` — the probe
+-- could not answer, which says nothing about whether the drive is there.
 CREATE TABLE IF NOT EXISTS scan_roots (
   scan_id   INTEGER NOT NULL REFERENCES scans(id),
   root_id   INTEGER NOT NULL REFERENCES roots(id),
   path      TEXT    NOT NULL,
-  status    TEXT    NOT NULL CHECK (status IN ('online', 'offline')),
+  status    TEXT    NOT NULL CHECK (status IN ('online', 'offline', 'probe_failed')),
   fstype    TEXT,
   PRIMARY KEY (scan_id, root_id)
 );
@@ -46,6 +47,9 @@ CREATE TABLE IF NOT EXISTS scans (
   started_at    TEXT    NOT NULL,
   finished_at   TEXT,
   status        TEXT    NOT NULL CHECK (status IN ('running', 'done', 'failed')),
+  -- Which part of the pipeline failed: walk, hash, bundles or metadata. A scan
+  -- covers the whole pipeline, so "it failed" is only actionable with this.
+  failure_stage TEXT,
   files_seen    INTEGER NOT NULL DEFAULT 0,
   dirs_seen     INTEGER NOT NULL DEFAULT 0,
   bytes_seen    INTEGER NOT NULL DEFAULT 0,

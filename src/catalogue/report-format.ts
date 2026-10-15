@@ -138,12 +138,17 @@ export function itemPath(root: string, relPath: string): string {
 }
 
 /**
- * `online`, or `offline, not scanned this run`. An offline root's figures come
- * from an earlier scan, and a report has to say so: a missing drive must never
- * read as a drive that lost its contents.
+ * `online`, `offline, not scanned this run`, or `probe_failed, not scanned`.
+ *
+ * A root's figures come from the last scan that could actually read it, and a
+ * report has to say which of those three produced them: a missing drive must
+ * never read as one that lost its contents, and a probe that could not answer
+ * must never read as one that is not there.
  */
 export function rootStatusText(root: { status: string }): string {
-  return root.status === 'offline' ? 'offline, not scanned this run' : 'online';
+  if (root.status === 'offline') return 'offline, not scanned this run';
+  if (root.status === 'probe_failed') return 'probe_failed, not scanned';
+  return 'online';
 }
 
 /** Keeps a name inside one table cell: no pipes, no line breaks. */

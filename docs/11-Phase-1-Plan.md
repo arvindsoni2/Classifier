@@ -10,7 +10,7 @@ Build a read-only catalogue of every configured root: files, directories, bundle
 - For each task: write the listed tests first, see them fail for the expected reason, implement, then run `pnpm typecheck && pnpm lint && pnpm test`. Commit with the message given.
 - Tests use synthetic fixture trees built in a temporary directory. Never point a test at a real home directory.
 - Do not modify files under `src/application`, `src/domain`, `src/http`, `ui` or `native`. The only permitted change to old code is Task 4's move of the ZIP reader into `src/shared/zip.ts`.
-- New runtime dependencies allowed in this phase: `exifr` only. Pin it and record its version in `docs/runtime-manifest.json`. Everything else uses Node built-ins, `better-sqlite3` and the external tools `ffprobe` and `pdfinfo`.
+- New runtime dependencies allowed in this phase: `exifr` only. Pin it and record its version in `docs/runtime-manifest.json`. Everything else uses Node built-ins, `better-sqlite3` and the external tools `ffprobe`, `pdfinfo` and `findmnt`.
 - When a task is done, append a short entry to `docs/phase-1-log.md`: task, commit, test count, anything deferred.
 
 ## Task 1 — Config, store, scanner and volumes
@@ -231,7 +231,53 @@ pnpm catalogue stats                              # one-screen totals
 3. Create a marker, then scan: `touch /tmp/before-scan && pnpm catalogue scan && pnpm catalogue report`.
 4. Confirm nothing inside the roots changed: `find <each root> -newer /tmp/before-scan -not -path '*/.*'` lists only files other programs changed.
 5. Run `pnpm catalogue scan` again and note `files_hashed` (should be near 0) and elapsed time.
-6. With the external drive as a root: unplug it, run `pnpm catalogue scan`, and confirm `stats` shows it offline with its item count unchanged. Plug it back in and scan again; `files_hashed` should be near 0.
+6. With the external drive as a root: unplug it, run `pnpm catalogue scan`, and confirm `stats` shows it offline with its item count unchanged. Plug it back in and scan again; `files_hashed` should be near 0. **Deferred by Arvind on 2026-10-15: no drive available. Offline, unmounted-mount-point, volume-changed and probe-failure paths are proven on fixtures only.**
 7. Hand Claude Code: `summary.md`, `summary.json`, the first 50 lines of `duplicates.csv` and `bundles.csv`, both scan times, the drive's filesystem type, the unplug result, and the output of `pnpm test`.
 
 Phase 1 is done when Claude Code's review finds the catalogue matches what is on disk and no blockers remain.
+
+## Task 7 — Hardening
+
+One session, one commit. Everything here closes a should-fix from either Phase 1 review; nothing adds a
+feature. Work in the order given, tests first, and mutation-check items 1–6 before committing.
+
+1. **Safe opens.** Every file open in `scanner.ts`, `dedupe.ts` and `metadata/readfile.ts` uses
+   `O_RDONLY | O_NOFOLLOW | O_NONBLOCK`, then `fstat`; anything that is not a regular file is recorded as a
+   scan error and not read. Without `O_NONBLOCK` a file swapped for a FIFO between the listing and the open
+   blocks the whole scan forever. *Test:* a FIFO swapped in after the directory is listed does not block the
+   scan (the test itself runs under a timeout) and produces one error row.
+2. **No swallowed errors.** `readHead` records open/read failures instead of returning empty. Items under a
+   directory that failed to list keep their previous state instead of being marked `missing`, and the
+   directory error is recorded. A store or database error aborts the scan with status `failed` instead of
+   being logged as a scan error.
+3. **Scan status covers the whole pipeline:** walk → hash → bundles → metadata. The `scans` row records one
+   elapsed time for all of it and becomes `done` only at the end. An exception at any stage leaves it
+   `failed`, naming the stage. *Test:* inject a throw during hashing; the row is `failed`.
+4. **Subtree SQL.** In `subtreeItemStats`, `setItemsBundleInSubtree` and `setBundlesParentInSubtree`, replace
+   `LIKE` with `substr(rel_path, 1, length(@relPath) + 1) = @relPath || '/'`, because in `LIKE` `_` matches
+   any character. *Test:* an archive `files/` beside sibling `Files/` and `fileX/` claims only its own items.
+5. **mtime tolerance by distance, not bucket:** unchanged when `|a − b| < 2 s`. *Tests:* 5.9 s vs 6.1 s is
+   unchanged; 4 s vs 6.5 s is changed.
+6. **A probe failure is not "offline".** `volume.ts` returns a distinct outcome when `findmnt` is missing,
+   times out or prints something unparsable: the root is skipped, its items are untouched, one
+   `PROBE_FAILED` scan error is recorded, and the report and `stats` show status `probe_failed`. One
+   injected-probe test per case.
+7. **`MOUNT_BOUNDARY` gets a test**, by injected probe or device mismatch.
+8. **Housekeeping.** Add `System Volume Information` and `$RECYCLE.BIN` to
+   `config/catalogue.example.json`'s `exclude`; add `findmnt` to the external-tools line above; give
+   `src/shared/zip.ts` a `Result` from a new `src/shared/result.ts` instead of `../domain/contracts.js`;
+   in `bundles.test.ts:155` and `:185` assert length before `every()`; split `bundles.test.ts` and
+   `scanner.test.ts` below 400 lines.
+9. **Defer the external-drive acceptance** (below).
+
+**Out of scope (Task 8):** report wording, metadata outcome counts, encrypted PDFs, large EPUBs, historical
+bundles. No new dependencies. Nothing under `src/application`, `src/domain`, `src/http`, `ui` or `native`,
+except `src/shared/zip.ts`'s import as listed in item 8.
+
+**Commit:** `fix(catalogue): safe opens, honest scan status and probe failures`
+
+### Task 6 step 6 — deferred
+
+**Deferred by Arvind on 2026-10-15: no drive available.** The offline, unmounted-mount-point,
+volume-changed and probe-failure paths are proven on fixtures only. Phase 5 may not start until this step
+has run on a real external drive and passed (spec §Phase 5).

@@ -18,7 +18,7 @@
  * Office's `docProps/core.xml`. Nothing is enumerated into memory.
  */
 import { inflateRawSync } from 'node:zlib';
-import { err, ok, type Result } from '../domain/contracts.js';
+import { err, ok, type Result } from './result.js';
 
 const EOCD_SIGNATURE = 0x06054b50;
 const CENTRAL_SIGNATURE = 0x02014b50;

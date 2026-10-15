@@ -55,7 +55,7 @@ interface ReportData {
 /** One root's line in a report: what it is, and what it holds. */
 interface RootFigures {
   path: string;
-  status: 'online' | 'offline';
+  status: 'online' | 'offline' | 'probe_failed';
   fstype: string | null;
   files: number;
   bytes: number;
@@ -150,7 +150,12 @@ function readRoots(store: CatalogueStore, scanId: number, items: ItemRow[]): Roo
        WHERE sr.scan_id = @scanId
        ORDER BY sr.path`,
     )
-    .all({ scanId }) as { path: string; status: 'online' | 'offline'; fstype: string | null; rootId: number }[];
+    .all({ scanId }) as {
+    path: string;
+    status: 'online' | 'offline' | 'probe_failed';
+    fstype: string | null;
+    rootId: number;
+  }[];
 
   if (covered.length === 0) {
     return [...perScan.entries()].map(([path, totals]) => ({
@@ -167,7 +172,7 @@ function readRoots(store: CatalogueStore, scanId: number, items: ItemRow[]): Roo
   );
   return covered.map((root) => {
     const totals =
-      root.status === 'offline'
+      root.status === 'offline' || root.status === 'probe_failed'
         ? (presentItems.get(root.rootId) as { files: number; bytes: number })
         : (perScan.get(root.path) ?? { files: 0, bytes: 0 });
     return { path: root.path, status: root.status, fstype: root.fstype, files: totals.files, bytes: totals.bytes };

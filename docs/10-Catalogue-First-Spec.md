@@ -94,6 +94,7 @@ Each phase has a goal, a real-data acceptance check and an explicit out-of-scope
 
 ### Phase 5 — Act on local files
 
+- **Before any move code:** run the deferred Phase 1 drive acceptance (plan Task 6 step 6) on a real external drive. Phase 5 cannot start until it passes.
 - **Goal:** approved groups move safely.
 - **Scope:** fix native probe finding F1 first; apply approved groups through `native/fsops`; bundles move as directories (requires a reviewed amendment to the helper, which currently refuses directory moves); journal, recovery and conditional undo per LLD §5–§7. The workflow layer is rewritten smaller; open findings F2 and F4–F7 must not be carried over.
 - **Per-volume capability check:** run the helper's probe for each volume at the start of every apply, never cache it across a reformat. Moves are disabled on a volume whose filesystem lacks no-overwrite rename or anchored resolution (some FUSE NTFS drivers), and the UI says why.
