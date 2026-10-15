@@ -25,6 +25,7 @@ The previous pilot (docs 01–08) organised only loose files at depth zero of `~
 | D28 | Evaluation labels come from **trusted existing folders**: files already sorted are free labelled examples. | Measurement can start without hand-labelling 200 items. |
 | D29 | Review is **by group** ("these 43 files → Learning/AWS"), not row by row. | Review time is the product's main cost. |
 | D30 | OpenCode implements; **Claude Code reviews**. Every phase ends with a **real-data acceptance check** run by Arvind. | The old process produced guards but never exercised the core job. |
+| D31 | Roots are identified by **filesystem UUID**, the filesystem is detected on every scan, and change detection adapts to it (inode-based on Linux filesystems, path-based on FAT, exFAT and NTFS). An unplugged drive is **offline**, never missing. | The external drive is reformatted for different uses, and USB device numbers change between plug-ins. |
 
 ## 3. Architecture
 
@@ -49,7 +50,7 @@ Phase 1 tables (Phase 1 plan gives exact columns):
 
 | Table | Holds |
 | --- | --- |
-| `roots` | Each configured root: path, device, inode, last scan |
+| `roots` | Each configured root: path, online/offline, volume UUID, label, filesystem type, identity mode, last scan |
 | `scans` | One row per scan run: start, end, counts, status |
 | `dirs` | Every directory visited: root, relative path, device/inode, child counts, bundle |
 | `items` | Every regular file: root, relative path, device/inode, size, mtime, kind, extension, partial and full hash, bundle, status, first/last seen |
@@ -95,6 +96,9 @@ Each phase has a goal, a real-data acceptance check and an explicit out-of-scope
 
 - **Goal:** approved groups move safely.
 - **Scope:** fix native probe finding F1 first; apply approved groups through `native/fsops`; bundles move as directories (requires a reviewed amendment to the helper, which currently refuses directory moves); journal, recovery and conditional undo per LLD §5–§7. The workflow layer is rewritten smaller; open findings F2 and F4–F7 must not be carried over.
+- **Per-volume capability check:** run the helper's probe for each volume at the start of every apply, never cache it across a reformat. Moves are disabled on a volume whose filesystem lacks no-overwrite rename or anchored resolution (some FUSE NTFS drivers), and the UI says why.
+- **Case-insensitive filesystems** (FAT, exFAT, NTFS): treat a target that differs only in case from an existing name as a collision.
+- Moves stay within one volume; moving between the laptop disk and an external drive (copy, verify, then delete) is a separate, later decision.
 - **Acceptance:** first 100 real moves and one verified undo.
 
 ### Phase 6 — Other sources

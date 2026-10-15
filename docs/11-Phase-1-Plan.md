@@ -13,26 +13,53 @@ Build a read-only catalogue of every configured root: files, directories, bundle
 - New runtime dependencies allowed in this phase: `exifr` only. Pin it and record its version in `docs/runtime-manifest.json`. Everything else uses Node built-ins, `better-sqlite3` and the external tools `ffprobe` and `pdfinfo`.
 - When a task is done, append a short entry to `docs/phase-1-log.md`: task, commit, test count, anything deferred.
 
-## Task 1 — Config, store and scanner
+## Task 1 — Config, store, scanner and volumes
 
-**Files:** `src/catalogue/config.ts`, `src/catalogue/store.ts`, `src/catalogue/schema.sql`, `src/catalogue/scanner.ts`, `src/catalogue/kinds.ts`, `tests/catalogue/fixtures.ts`, `tests/catalogue/scanner.test.ts`, `config/catalogue.example.json`.
+Do this task in two sessions. **1a:** everything except `volume.ts` and `volume.test.ts`, with the scanner taking a `VolumeProbe` parameter and the tests passing a fake that always reports the same ext4 volume. **1b:** `volume.ts`, its tests, and the offline, volume-changed and path-mode behaviour. Commit each separately (`…scanner and store`, then `feat(catalogue): filesystem-aware volume handling`).
+
+**Files:** `src/catalogue/config.ts`, `src/catalogue/store.ts`, `src/catalogue/schema.sql`, `src/catalogue/volume.ts`, `src/catalogue/scanner.ts`, `src/catalogue/kinds.ts`, `tests/catalogue/fixtures.ts`, `tests/catalogue/volume.test.ts`, `tests/catalogue/scanner.test.ts`, `config/catalogue.example.json`.
 
 **Config** (`config/local/catalogue.json`, gitignored; path overridable with `CLASSIFIER_CONFIG`):
 
 ```json
 {
-  "roots": ["/home/asoni/Downloads", "/home/asoni/Documents"],
+  "roots": ["/home/asoni/Downloads", "/home/asoni/Documents", "/run/media/asoni/MyPassport"],
   "exclude": ["node_modules", "__pycache__", ".venv", "venv", ".tox", ".cache", ".Trash-*"],
   "dataDir": "~/.local/share/classifier"
 }
 ```
 
-`loadConfig()` validates: every root is an absolute, existing directory; no root is inside another root; `dataDir` is not inside any root. Invalid config is an error with a clear message, never a silent fallback.
+`loadConfig()` validates: every root is an absolute path; no root is inside another root; `dataDir` is not inside any root. A root that does not exist right now (an unplugged drive) is **not** a config error; the scan reports it as offline. Invalid config is an error with a clear message, never a silent fallback.
+
+**Volumes** (`volume.ts`). Roots can be on an external drive whose filesystem changes when it is reformatted (ext4, NTFS, exFAT, FAT32 and others). Detect the volume at the start of every scan, never assume it:
+
+```ts
+interface VolumeInfo { uuid: string | null; label: string | null; fstype: string; mountPoint: string; }
+type VolumeProbe = (path: string) => Promise<VolumeInfo | null>;   // null: path missing
+```
+
+The default probe runs `findmnt --json --output UUID,LABEL,FSTYPE,TARGET --target <path>` (argument array, 5-second timeout). Tests inject a fake probe. From the result:
+
+| Situation | Detected by | Scan behaviour |
+| --- | --- | --- |
+| **Offline** (drive unplugged) | Path missing, or the root was recorded as a mount point (`path == mountPoint`) and now is not | Skip the root, set `roots.status = 'offline'`, change **no** item. Never mark items missing because a drive is absent. |
+| **Volume changed** (reformatted, or another drive at the same path) | `uuid` differs from the recorded `volume_uuid` | Mark the root's present items `missing`, record `VOLUME_CHANGED` in `scan_errors`, store the new volume details, then scan as new. |
+| **Same volume** | `uuid` matches, or both are null and `fstype` matches | Normal incremental scan. |
+
+Identity mode, chosen per scan from `fstype` and stored on the root:
+
+- `inode` for `ext4`, `xfs`, `btrfs`, `f2fs`, `ext3`, `ext2`: unchanged means equal `(ino, size, mtime_ns)`; hard links are detected by `(dev, ino)`.
+- `path` for everything else (`vfat`, `exfat`, `ntfs`, `ntfs3`, `fuseblk`, unknown): unchanged means equal `(rel_path, size)` and mtime equal at **2-second** precision (FAT stores 2-second times). Inode numbers are stored but never trusted, and no hard-link detection is attempted.
+
+The device number (`dev`) is used only within one scan, for the mount-boundary check. It is never compared across scans, because a USB drive can get a different device number each time it is plugged in.
 
 **Schema** (`schema.sql`; WAL, foreign keys on, `synchronous=NORMAL`; database file mode 0600, data dir 0700):
 
 ```sql
-roots(id INTEGER PK, path TEXT UNIQUE, dev TEXT, ino TEXT, added_at TEXT, last_scan_id INTEGER)
+roots(id INTEGER PK, path TEXT UNIQUE, status TEXT,             -- online|offline
+      volume_uuid TEXT, volume_label TEXT, fstype TEXT, mount_point TEXT, is_mount_point INTEGER,
+      identity_mode TEXT,                                          -- inode|path
+      added_at TEXT, last_scan_id INTEGER, last_online_at TEXT)
 scans(id INTEGER PK, started_at TEXT, finished_at TEXT, status TEXT,   -- running|done|failed
       files_seen INTEGER, dirs_seen INTEGER, bytes_seen INTEGER, files_hashed INTEGER, errors INTEGER)
 dirs(id INTEGER PK, root_id INTEGER, rel_path TEXT, dev TEXT, ino TEXT,
@@ -47,19 +74,20 @@ items(id INTEGER PK, root_id INTEGER, rel_path TEXT, dir_id INTEGER, name TEXT, 
 scan_errors(id INTEGER PK, scan_id INTEGER, root_id INTEGER, rel_path TEXT, code TEXT, message TEXT)
 ```
 
-(`bundles` and `metadata` tables arrive in Tasks 3 and 4.) Integer stat values that can exceed 2^53 (`dev`, `ino`, `mtime_ns`) are stored as decimal strings, read with `bigint: true`.
+(`bundles` and `metadata` tables arrive in Tasks 3 and 4.) Integer stat values that can exceed 2^53 (`dev`, `ino`, `mtime_ns`) are stored as decimal strings, read with `bigint: true`. `scans` also records, per root, whether it was online and its `fstype`, so a report can say which drives were included.
 
 **Scanner rules:**
 
 1. Walk each root with `fs.opendir` and `lstat` (`bigint: true`). Iterative, not recursive, so deep trees cannot overflow the stack.
 2. Never follow symlinks: record nothing for them except a count in the scan totals.
-3. Never cross a mount: a directory whose `dev` differs from its root's is recorded in `scan_errors` with code `MOUNT_BOUNDARY` and not entered.
+3. Never cross a mount: a directory whose `dev` differs from the root's `dev` **in this scan** is recorded in `scan_errors` with code `MOUNT_BOUNDARY` and not entered. A drive mounted inside a root is therefore skipped; list it as its own root instead.
 4. Skip sockets, FIFOs and devices.
 5. Directory names matching `exclude` (simple name or `*` glob) are not entered. Hidden names (leading `.`) are not catalogued, except that a `.git` entry is noted on its parent for bundle detection in Task 3.
 6. Names ending `.part`, `.crdownload`, `.download` or `.tmp` get `status = 'incomplete'`.
 7. Permission and I/O errors go to `scan_errors`; the scan continues.
 8. Insert in transactions of 1,000 rows. Memory must not grow with the number of files beyond one directory's listing.
-9. Incremental: an item whose `(dev, ino, size, mtime_ns)` is unchanged keeps its hashes (and later its metadata). Items not seen in this scan become `status = 'missing'`; rows are never deleted.
+9. Incremental: an item that is unchanged under the root's identity mode (see Volumes) keeps its hashes (and later its metadata). Items not seen in a scan of an **online** root become `status = 'missing'`; rows are never deleted.
+10. Treat names as opaque byte strings: do not normalise case or Unicode. Case-insensitive filesystems (FAT, exFAT, NTFS) are handled in Phase 5, not by renaming anything here.
 
 **Kinds** (`kinds.ts`): extension map plus a magic-byte check on the first 16 bytes for files with no or a misleading extension (`%PDF`, `PK\x03\x04`, `\x89PNG`, `\xFF\xD8\xFF`, `ID3`, `fLaC`, `OggS`, `RIFF…WAVE`, `ftyp` at offset 4, `\x1A\x45\xDF\xA3`). Kinds: `document`, `ebook`, `audio`, `video`, `image`, `archive`, `installer`, `code`, `data`, `other`. Magic wins over extension when they disagree.
 
@@ -71,7 +99,17 @@ scan_errors(id INTEGER PK, scan_id INTEGER, root_id INTEGER, rel_path TEXT, code
 - `marks_incomplete_and_missing`: a `.crdownload` file is `incomplete`; a file deleted between two scans becomes `missing` and keeps its row.
 - `kind_from_magic_bytes`: a PDF named `report.bin` is `document`.
 - `scan_is_read_only`: snapshot `(path, size, mtime, sha256)` of every fixture file before and after the scan; they are identical, and no new file exists inside the fixture root.
-- `config_rejects_nested_roots_and_data_dir_inside_root`.
+- `config_rejects_nested_roots_and_data_dir_inside_root`; a missing root path is accepted.
+
+**Tests** (`volume.test.ts`), using an injected probe over ordinary fixture directories:
+
+- `offline_root_changes_nothing`: scan, then make the probe report the root missing; second scan sets `status = 'offline'` and every item keeps `status = 'present'` and its hashes.
+- `unmounted_mount_point_is_offline`: root first recorded with `path == mountPoint`; probe then reports the parent filesystem; the root is offline and the (now empty-looking) directory is not scanned.
+- `volume_change_retires_old_items`: probe returns a new UUID; old items become `missing`, one `VOLUME_CHANGED` error is recorded, new files are catalogued.
+- `path_mode_ignores_inode_changes`: fstype `exfat`; between scans, inode numbers change (fake stat) but path, size and mtime do not; nothing is re-hashed.
+- `path_mode_tolerates_two_second_mtime`: fstype `vfat`; mtime differs by 1 s → unchanged; by 3 s → changed.
+- `inode_mode_detects_rename_as_same_file`: fstype `ext4`; a renamed file keeps its hashes.
+- `default_probe_parses_findmnt`: parse checked-in sample `findmnt --json` outputs for ext4, exfat, ntfs3 and a missing UUID; skip the live call with a visible reason when `findmnt` is absent.
 
 **Commit:** `feat(catalogue): read-only recursive scanner and store`
 
@@ -86,7 +124,7 @@ scan_errors(id INTEGER PK, scan_id INTEGER, root_id INTEGER, rel_path TEXT, code
 3. Full SHA-256: computed only where partial hashes collide. Streamed with a fixed buffer; never read a whole file into memory.
 4. Hash from an opened file descriptor, and check `fstat` size and mtime before and after; if they changed, record `CHANGED_DURING_HASH` in `scan_errors` and leave `sha256` null.
 5. Unchanged items (Task 1 rule 9) are not re-hashed.
-6. `duplicateGroups()` returns groups of ≥ 2 present items with equal `sha256`, each with `wastedBytes = (n − 1) × size`, sorted by wasted bytes descending. Hard links (same `dev`+`ino`) count as one copy, not a duplicate.
+6. `duplicateGroups()` returns groups of ≥ 2 present items with equal `sha256`, each with `wastedBytes = (n − 1) × size`, sorted by wasted bytes descending. On `inode`-mode roots, hard links (same `dev`+`ino` within one scan) count as one copy, not a duplicate; on `path`-mode roots no hard-link detection is attempted.
 
 **Tests:**
 
@@ -193,6 +231,7 @@ pnpm catalogue stats                              # one-screen totals
 3. Create a marker, then scan: `touch /tmp/before-scan && pnpm catalogue scan && pnpm catalogue report`.
 4. Confirm nothing inside the roots changed: `find <each root> -newer /tmp/before-scan -not -path '*/.*'` lists only files other programs changed.
 5. Run `pnpm catalogue scan` again and note `files_hashed` (should be near 0) and elapsed time.
-6. Hand Claude Code: `summary.md`, `summary.json`, the first 50 lines of `duplicates.csv` and `bundles.csv`, both scan times, and the output of `pnpm test`.
+6. With the external drive as a root: unplug it, run `pnpm catalogue scan`, and confirm `stats` shows it offline with its item count unchanged. Plug it back in and scan again; `files_hashed` should be near 0.
+7. Hand Claude Code: `summary.md`, `summary.json`, the first 50 lines of `duplicates.csv` and `bundles.csv`, both scan times, the drive's filesystem type, the unplug result, and the output of `pnpm test`.
 
 Phase 1 is done when Claude Code's review finds the catalogue matches what is on disk and no blockers remain.
