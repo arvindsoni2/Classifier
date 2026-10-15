@@ -1220,3 +1220,74 @@ helpers and files listed in the diff. `report.test.ts` (434) and `metadata.test.
   spec's Phase 5 scope, which may not start until it passes.
 - **Task 8**, per scope: report wording, metadata outcome counts, encrypted PDFs,
   large EPUBs, historical bundles.
+
+## Review follow-up — Task 7 (`files_hashed`, unreadable-is-not-deleted)
+
+One session. One commit: `fix(catalogue): keep files_hashed and never retire what could
+not be read` (`35124a3`). The review is `docs/reviews/phase-1-task-7-2026-10-15.md`; it
+was not in the repo, so it is added with this entry.
+
+**Tests:** 361 pass (358 before, +3). `pnpm typecheck`, `pnpm lint` and `pnpm test` all
+pass. Both fixes are mutation-checked below. No new dependencies. No CLI run against a
+real root. Nothing pushed.
+
+### 1. `files_hashed` is written only by the hash stage
+
+Task 7 moved hashing inside the scan row and, in doing so, made the walk's totals the
+last word on `scans.files_hashed`: `finishScan` wrote `totals.filesHashed`, which the
+walk never sets, so the hash stage's real count was overwritten with 0 on every scan.
+Before Task 7 the CLI hashed after the scan had closed, which is why the Task 6 run
+read 15,418.
+
+`files_hashed` is dropped from `finishScan`'s `UPDATE` and the dead `filesHashed` field
+is removed from `ScanTotals`; `setFilesHashed` (the hash stage) is now the only writer.
+`scan-status.test.ts` runs `scan()` with the real `computeHashes` as its `hash` stage on
+three files where two share a size: 2 after the first scan, 0 after the rescan, and
+`summary.md` shows both. Reverting the fix (writing `files_hashed = 0` in `finishScan`)
+fails that test.
+
+### 2. Unreadable is not deleted, at the root and for a single file
+
+`markMissingNotSeen` protected only the subtree of a directory it could not list, and it
+did so by enumerating that subtree's directory ids. Three holes, each now closed:
+
+- **The root.** The walk pushed `''` for a root it could not list, and the prefix test
+  `substr(rel_path, 1, length('') + 1) = '' || '/'` matches nothing, so every item below
+  the top level was marked `missing` although the walk had seen nothing at all. `''` now
+  means "the root was not listed": nothing of that root is retired.
+- **A single file.** A file whose `lstat` or head read failed with anything but `ENOENT`
+  had no row written, so its old `last_seen_scan` made it `missing`. Its `rel_path` is
+  protected now, and only `ENOENT` — the one code that means the file is really gone —
+  lets the row be retired.
+- **The placeholder list.** `dir_id NOT IN (?, ?, ...)` was built from every directory id
+  in the protected subtree, so a protected subtree of thousands of directories would
+  exceed SQLite's variable limit. It is a `NOT EXISTS` over `json_each(@protected)`
+  matching by `rel_path` prefix: one parameter for one protected path, whatever it
+  contains.
+
+`scanner-hardening.test.ts` covers both: a rescan whose *root* listing fails leaves
+`top.txt`, `a/x.txt` and `a/b/y.txt` present with their hashes; a rescan where `a/x.txt`
+fails to open with `EACCES` leaves its row exactly as it was and records the one error.
+Both use new `ScanHooks` seams — `listDirectory` and `openFile` — because `chmod 000`
+does not deny root, so the tests must pass as root. Reverting either half fails its own
+test: removing the `''` guard fails the root test, `protect: false` fails the file test.
+
+### Interpretation, and files outside the task's list
+
+- `markMissingNotSeen`'s old `dir_id IS NULL OR` clause is gone. It was a NULL-semantics
+  accident (it applied only when there was at least one unlistable path) and the
+  catalogue never writes a NULL `dir_id`; path-prefix protection covers the real case.
+- `scan-root.ts` (397) is split so nothing is over 400: the per-file read — `lstat`, head
+  read, `statusFor` and the "could not read" rule — moves to `src/catalogue/scan-file.ts`
+  (132), and `errorCode`/`messageOf` move to `src/shared/errors.ts` (21) because the walk
+  and the file read both need them. `scan-root.ts` is now 339.
+- New `ScanHooks.listDirectory` and `ScanHooks.openFile` seams, in the same style as
+  Task 7's `deviceOf`.
+- `tests/catalogue/report.test.ts` loses the `filesHashed: 0` field from a hand-built
+  `ScanTotals` literal; it is the only other constructor of the type.
+- `src/application`, `src/domain`, `src/http`, `ui` and `native` are untouched.
+
+### Deferred
+
+Task 6 step 6 (external drive unplug/replug) is still deferred: no drive attached.
+Phase 5 cannot start until it passes on real hardware.
