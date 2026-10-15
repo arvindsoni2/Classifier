@@ -148,6 +148,63 @@ describe('catalogue scanner (Phase 1 Task 1)', () => {
     expect(result.totals.symlinksSeen).toBe(2);
   });
 
+  it('does not enter Python virtualenvs, whatever they are named', async () => {
+    // A virtualenv is identified by its contents, not its name: `venv` and
+    // `.venv` are in the exclude list, but nobody names their envs that way.
+    const fx = fixture('virtualenv', [
+      'envs/torch_env/pyvenv.cfg',
+      'envs/torch_env/lib/python3.12/site-packages/torch/include/header.h',
+      'envs/torch_env/lib/python3.12/site-packages/pkg.py',
+      'envs/myenv/pyvenv.cfg',
+      'envs/myenv/bin/python',
+      'envs/myenv/lib/site-packages/thing.py',
+      'work/notes.txt',
+      'work/data/values.csv',
+    ]);
+    const store = storeFor(fx);
+    const result = await scan(loadConfig(configFor(fx)), store);
+
+    // Nothing inside either virtualenv is catalogued, at any depth.
+    const catalogued = items(store).map((row) => row.rel_path);
+    expect(catalogued.filter((path) => path.startsWith('envs/'))).toEqual([]);
+    expect(catalogued.some((path) => path.includes('torch'))).toBe(false);
+    expect(catalogued.some((path) => path.includes('site-packages'))).toBe(false);
+    // The rest of the tree is scanned as normal.
+    expect(catalogued).toEqual(['work/data/values.csv', 'work/notes.txt']);
+    // A skipped virtualenv is not even recorded as a directory, exactly like a
+    // name matched by `exclude`.
+    const dirs = store.db.prepare('SELECT rel_path FROM dirs ORDER BY rel_path').all() as { rel_path: string }[];
+    expect(dirs.map((row) => row.rel_path)).toEqual(['', 'envs', 'work', 'work/data']);
+    expect(result.totals.filesSeen).toBe(2);
+  });
+
+  it('still scans a root that is itself a virtualenv', async () => {
+    // The root is exempt: skipping it would catalogue nothing at all, and the
+    // data directory is never inside a root anyway.
+    const fx = fixture('virtualenv-root', ['pyvenv.cfg', 'lib/site-packages/thing.py']);
+    const store = storeFor(fx);
+    const result = await scan(loadConfig(configFor(fx)), store);
+
+    const catalogued = items(store).map((row) => row.rel_path);
+    expect(catalogued).toContain('lib/site-packages/thing.py');
+    expect(catalogued).toContain('pyvenv.cfg');
+    expect(result.totals.filesSeen).toBe(2);
+  });
+
+  it('a nested virtualenv does not hide its siblings', async () => {
+    // The skip is per directory; it is not inherited by the parent.
+    const fx = fixture('virtualenv-nested', [
+      'project/venv/pyvenv.cfg',
+      'project/venv/lib/x.py',
+      'project/src/main.py',
+      'project/README.md',
+    ]);
+    const store = storeFor(fx);
+    await scan(loadConfig(configFor(fx)), store);
+
+    expect(items(store).map((row) => row.rel_path)).toEqual(['project/README.md', 'project/src/main.py']);
+  });
+
   it('records errors and continues', async () => {
     if (process.getuid?.() === 0) {
       // chmod 000 does not deny root, so the fixture could not prove anything.

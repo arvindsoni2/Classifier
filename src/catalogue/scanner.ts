@@ -72,6 +72,16 @@ const BATCH_ROWS = 1_000;
 
 const INCOMPLETE_EXTENSIONS: ReadonlySet<string> = new Set(['part', 'crdownload', 'download', 'tmp']);
 
+/**
+ * A directory containing this file is a Python virtualenv and is not entered.
+ *
+ * Content, not name, is the signal: `.venv` and `venv` are already in the
+ * default exclude list, and the environments that actually exist are named
+ * `env1`, `myenv`, `pytorch_env`. `pyvenv.cfg` is written by `python -m venv`
+ * and by no ordinary directory, so one entry in a listing is enough.
+ */
+const VIRTUALENV_MARKER = 'pyvenv.cfg';
+
 function isHidden(name: string): boolean {
   return name.startsWith('.');
 }
@@ -148,6 +158,16 @@ async function scanRoot(
       continue;
     }
     totals.symlinksSeen += listing.symlinks;
+
+    // A Python virtualenv is skipped the way an excluded name is: not entered,
+    // nothing recorded. It is recognised by its contents rather than its name,
+    // because `venv` and `.venv` are already in the exclude list and nobody
+    // calls their environment `venv` — on Arvind's roots these held 19,287 of
+    // 23,323 items, mostly headers and duplicated library files.
+    if (rel !== '' && listing.allNames.includes(VIRTUALENV_MARKER)) {
+      totals.virtualenvsSkipped += 1;
+      continue;
+    }
 
     const boundary = hooks.onDirectory?.({ rootId, scanId, relPath: rel, absPath: current.absPath, names: listing.allNames }) === false;
 
@@ -304,6 +324,7 @@ export async function scan(
     errors: 0,
     symlinksSeen: 0,
     bundlesSeen: 0,
+    virtualenvsSkipped: 0,
   };
 
   try {

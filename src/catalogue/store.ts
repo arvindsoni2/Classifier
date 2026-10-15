@@ -25,6 +25,11 @@ export interface ScanTotals {
    * `symlinksSeen`, the `scans` table has no column for it (plan Task 3).
    */
   bundlesSeen: number;
+  /**
+   * Python virtualenvs skipped because their listing held `pyvenv.cfg`.
+   * In-process only, for the same reason as `symlinksSeen`.
+   */
+  virtualenvsSkipped: number;
 }
 
 export interface DirRow {

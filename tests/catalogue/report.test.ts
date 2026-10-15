@@ -392,6 +392,7 @@ it('writes the report under the data directory and nothing inside the root', asy
       errors: 0,
       symlinksSeen: 0,
       bundlesSeen: 0,
+      virtualenvsSkipped: 0,
     });
     const running = store.startScan('2026-01-02T00:00:00.000Z');
 
