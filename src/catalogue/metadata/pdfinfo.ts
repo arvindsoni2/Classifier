@@ -7,11 +7,12 @@
  */
 import type { Extractor } from './types.js';
 import { runTool } from './proc.js';
+import { NOT_A_REGULAR_FILE } from '../open.js';
+import { lstat } from 'node:fs/promises';
 
 const VERSION = 'pdfinfo@1.0.0';
 const TOOL = 'pdfinfo';
 const TOOL_TIMEOUT_MS = 10_000;
-
 /** pdfinfo key to catalogue field. Only these are stored. */
 const KEYS: Readonly<Record<string, string>> = {
   Title: 'title',
@@ -57,14 +58,32 @@ export const pdfinfoExtractor: Extractor = {
   },
 
   async extract(absPath, signal) {
+    // Never spawn a tool for something that is not a regular file: a FIFO or
+    // directory swapped in after the scan would otherwise block or mislead.
+    const stat = await lstat(absPath).catch(() => null);
+    if (stat !== null && !stat.isFile()) {
+      const error = new Error(`${NOT_A_REGULAR_FILE}: ${absPath} is not a regular file`) as Error & { code?: string };
+      error.code = NOT_A_REGULAR_FILE;
+      throw error;
+    }
+
     const run = await runTool(TOOL, [absPath], { timeoutMs: TOOL_TIMEOUT_MS, signal });
     if (run.spawnFailed) throw new Error('pdfinfo is not available on this machine');
     if (run.timedOut) throw new Error(`pdfinfo timed out after ${TOOL_TIMEOUT_MS}ms`);
-    if (run.code !== 0) {
+
+    const output = run.stdout.toString('utf8');
+    const fields = parseInfo(output);
+    const encrypted = fields.get('Encrypted');
+    const isEncrypted = encrypted !== undefined && encrypted.toLowerCase() === 'yes';
+
+    // A password-protected PDF still reports `Encrypted: yes`, and some builds
+    // exit non-zero for it. That is not a catalogue failure: the file is present
+    // and its encryption state is known, so record it as ok with what pdfinfo
+    // reported. Anything else that exits non-zero is a real failure.
+    if (run.code !== 0 && !isEncrypted) {
       throw new Error(`pdfinfo exited ${String(run.code)}: ${run.stderr.trim().slice(0, 200)}`);
     }
 
-    const fields = parseInfo(run.stdout.toString('utf8'));
     const kept: Record<string, unknown> = {};
     for (const [pdfKey, field] of Object.entries(KEYS)) {
       const value = fields.get(pdfKey);
@@ -72,8 +91,7 @@ export const pdfinfoExtractor: Extractor = {
     }
     const pages = integerOrUndefined(fields.get('Pages'));
     if (pages !== undefined) kept.pages = pages;
-    const encrypted = fields.get('Encrypted');
-    if (encrypted !== undefined) kept.encrypted = encrypted.toLowerCase() === 'yes';
+    if (encrypted !== undefined) kept.encrypted = isEncrypted;
     return kept;
   },
 };

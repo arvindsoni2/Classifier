@@ -29,6 +29,12 @@ const ADDED_ROOT_COLUMNS: readonly (readonly [string, string])[] = [
 /** `scans` grew one column, for the same reason. */
 const ADDED_SCAN_COLUMNS: readonly (readonly [string, string])[] = [['failure_stage', 'TEXT']];
 
+/** `bundles` grew two scan-tracking columns, backfilled from `detected_scan`. */
+const ADDED_BUNDLE_COLUMNS: readonly (readonly [string, string])[] = [
+  ['first_seen_scan', 'INTEGER REFERENCES scans(id)'],
+  ['last_seen_scan', 'INTEGER REFERENCES scans(id)'],
+];
+
 /** Applies `ALTER TABLE ... ADD COLUMN` for a table, skipping columns it has. */
 function addMissingColumns(db: Database.Database, table: string, columns: readonly (readonly [string, string])[]): void {
   const present = new Set(
@@ -80,5 +86,20 @@ function widenScanRootsStatus(db: Database.Database): void {
 export function migrateSchema(db: Database.Database): void {
   addMissingColumns(db, 'roots', ADDED_ROOT_COLUMNS);
   addMissingColumns(db, 'scans', ADDED_SCAN_COLUMNS);
+  addMissingColumns(db, 'bundles', ADDED_BUNDLE_COLUMNS);
+  // Backfill bundle scan tracking from `detected_scan` for catalogues that predate
+  // these columns, so historical reports keep the bundles they originally listed.
+  const needsBackfill = db
+    .prepare(
+      'SELECT COUNT(*) AS n FROM bundles WHERE first_seen_scan IS NULL OR last_seen_scan IS NULL',
+    )
+    .get() as { n: number };
+  if (needsBackfill.n > 0) {
+    db.prepare(
+      `UPDATE bundles SET
+        first_seen_scan = COALESCE(first_seen_scan, detected_scan),
+        last_seen_scan = COALESCE(last_seen_scan, detected_scan)`,
+    ).run();
+  }
   widenScanRootsStatus(db);
 }

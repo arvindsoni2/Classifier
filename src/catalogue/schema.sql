@@ -109,6 +109,11 @@ CREATE TABLE IF NOT EXISTS bundles (
   member_count      INTEGER,
   total_size        INTEGER,
   detected_scan     INTEGER REFERENCES scans(id),
+  -- The first and last scans that detected this bundle. `report --scan N` lists a
+  -- bundle when first_seen_scan <= N <= last_seen_scan, so historical reports keep
+  -- the bundles they originally showed even after a later scan re-detects them.
+  first_seen_scan   INTEGER REFERENCES scans(id),
+  last_seen_scan    INTEGER REFERENCES scans(id),
   UNIQUE (root_id, rel_path)
 );
 

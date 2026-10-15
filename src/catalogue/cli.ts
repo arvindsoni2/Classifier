@@ -23,7 +23,7 @@ import { loadConfig, validateConfig, ConfigError, type CatalogueConfig } from '.
 import { computeHashes, type HashRunSummary } from './dedupe.js';
 import { defaultVolumeProbe } from './volume.js';
 import { extractMetadata, type MetadataRunSummary } from './metadata/index.js';
-import { latestFinishedScan, reportSummary, writeReport } from './report.js';
+import { latestFinishedScan, reportSummary, storedMetadataOutcomes, writeReport } from './report.js';
 import { rootStatusText } from './report-format.js';
 import { scan } from './scanner.js';
 import { openStore } from './store.js';
@@ -228,6 +228,7 @@ async function runScan(config: CatalogueConfig): Promise<number> {
     }
     const hashSummary: HashRunSummary = hashes;
     const metadataSummary: MetadataRunSummary = metadata;
+    const stored = storedMetadataOutcomes(store, result.scanId).stored;
     const elapsedSeconds = ((Date.now() - startedAt) / 1000).toFixed(1);
     console.log(
       [
@@ -238,8 +239,9 @@ async function runScan(config: CatalogueConfig): Promise<number> {
           : []),
         `${result.totals.filesSeen} files in ${result.totals.dirsSeen} directories, ` +
           `${formatBytes(result.totals.bytesSeen)}, ${result.totals.errors} errors.`,
-        `Hashed ${hashSummary.filesHashed} file(s); ${bundles.length} bundle(s); ` +
-          `metadata ok for ${metadataSummary.ok} of ${metadataSummary.candidates}.`,
+        `Hashed ${hashSummary.filesHashed} file(s); ${bundles.length} bundle(s).`,
+        `metadata: ${metadataSummary.extracted} extracted this run, ${metadataSummary.unchanged} already settled; ` +
+          `stored: ${stored.ok} ok, ${stored.failed} failed, ${stored.timeout} timeout, ${stored.unavailable} unavailable.`,
         `Elapsed: ${elapsedSeconds}s`,
         `Catalogue: ${store.path}`,
       ].join('\n'),
@@ -289,6 +291,8 @@ export function formatStats(summary: ReturnType<typeof reportSummary>): string {
     ...summary.kinds.map((kind) => `  ${kind.kind}: ${kind.files} files, ${formatBytes(kind.bytes)}`),
     `  ${summary.bundles.total} bundles, ${summary.duplicates.groups} duplicate groups, ` +
       `${formatBytes(summary.duplicates.wastedBytes)} wasted.`,
+    `  metadata: ${summary.metadata.stored.ok} ok, ${summary.metadata.stored.failed} failed, ` +
+      `${summary.metadata.stored.timeout} timeout, ${summary.metadata.stored.unavailable} unavailable.`,
   ].join('\n');
 }
 

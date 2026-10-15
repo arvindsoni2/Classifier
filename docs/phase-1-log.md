@@ -1291,3 +1291,157 @@ test: removing the `''` guard fails the root test, `protect: false` fails the fi
 
 Task 6 step 6 (external drive unplug/replug) is still deferred: no drive attached.
 Phase 5 cannot start until it passes on real hardware.
+
+## Task 8 — Report truth (Phase 1 close-out)
+
+Commit: `feat(catalogue): honest metadata outcomes, seeking ZIP reads and stable bundle history`
+(hash appended below once the commit exists).
+
+**Tests:** 377 pass, 1 skipped (378 total; 361 before, +17). `pnpm typecheck`, `pnpm lint` and
+`pnpm test` all pass. Fifteen mutation runs, all caught (one needed a stronger test first — see
+below). No new dependencies; `docs/runtime-manifest.json` is unchanged. No CLI run against a real
+root.
+
+### 1. Metadata outcomes are visible
+
+`summary.md`, `summary.json` and `stats` now carry per-extractor stored counts for the present
+items of the scan: ok, failed, timeout, unavailable. They count what is **stored**, not what ran
+this run — a `failed` row written by an earlier scan still counts as `failed` here, because
+`failed` is settled (item 2) and is not retried while the item is unchanged. That is the whole
+point: Arvind's Task 6 run reported "metadata ok for 0 of 2370" and hid 87 failures underneath
+it.
+
+`metadata_failures.csv` sits beside `errors.csv` with the columns `root, rel_path, extractor,
+status, error`. Scan errors and metadata failures are now separate figures and separately named;
+`summary.json` carries `scan.errors` and `metadata.stored.failed` as different numbers, and the
+end-to-end CLI test asserts both are present.
+
+The console line is now:
+
+```
+metadata: 13 extracted this run, 2357 already settled; stored: 12 ok, 87 failed, 0 timeout, 0 unavailable
+```
+
+`summariseMetadata` lives in `report-summary.ts` (a pure fold over the aggregate, no SQL) and
+`storedMetadataOutcomes` in `report.ts` is a one-query path for the console line, so printing four
+counts does not also compute kinds, bundles and duplicate groups over every item.
+
+### 2. Deterministic failures settle
+
+`SETTLED` is now `{ok, failed}`. A failed extraction is not retried while the item is unchanged,
+and a changed file already drops its rows during the scan, so it is retried then.
+
+This **changed** `unavailable`, which was previously in `SETTLED`. It is now retried every scan,
+as the task requires: an extractor whose tool was missing yesterday and is installed today must be
+noticed. `extractMetadata` already probed availability once per extractor per scan, so the cost is
+one probe, not one per file — `metadata.test.ts`'s "a missing tool is unavailable once" still
+holds.
+
+### 3. An encrypted PDF is `ok`
+
+When pdfinfo reports `Encrypted: yes`, or exits non-zero while doing so, the row is `ok` with
+`encrypted: true` and whatever pdfinfo did report. Anything else that exits non-zero is still
+`failed`. A non-encrypted PDF keeps `encrypted: false`, so the existing field is unchanged.
+
+The test builds the fixture with `qpdf --encrypt '' '' 128` and **skips with a visible reason on
+this machine, because qpdf is not installed** (pdfinfo and ffprobe are). This is the one piece of
+Task 8 that is not proven here. It needs a re-run on a machine with qpdf before Phase 5.
+
+### 4. Large EPUB and Office files
+
+`epub.ts` and `office.ts` no longer read the file. `readZipEntryFromHandle` in `src/shared/zip.ts`
+seeks: it reads the end-of-central-directory record from the last 65,557 bytes, walks the central
+directory entry by entry, then reads only the local header and the data of the entry it wants.
+The existing `ZIP_INFLATE_BUDGET_BYTES` cap is still enforced per entry, checked against the
+central directory's uncompressed size before any inflate. ZIP64 is refused with a clear
+`unsupported ZIP64 entry` rather than approximated, in three places: the entry count, the central
+directory offset, and any per-entry offset or size that is `0xffffffff`.
+
+The archive is opened through `openRegularFile`, so it is still one descriptor with
+`O_RDONLY | O_NOFOLLOW | O_NONBLOCK` and an `fstat` refusal of anything that is not a regular
+file. `src/shared/` therefore takes a `FileHandle`, not a path: the safe-open door stays in the
+catalogue layer and `shared` does not import from `catalogue`. The caller's `AbortSignal` is
+threaded through the bounded reads, so a cancelled extraction still stops.
+
+The test builds an EPUB with a 64 MiB stored filler entry and asserts its title and author are
+extracted — the file is above `MAX_EXTRACTOR_INPUT_BYTES`, which is exactly what used to refuse it.
+
+### 5. Historical reports keep their bundles
+
+`bundles` gains `first_seen_scan` and `last_seen_scan` through an additive `ALTER TABLE`
+migration, backfilled from `detected_scan` for catalogues that predate them. Detection sets
+`last_seen_scan` on conflict and deliberately does **not** move `first_seen_scan`. `report --scan N`
+lists a bundle when `first_seen_scan <= N <= last_seen_scan`, so a scan-1 report still lists the
+bundles scan 1 found after a later scan has re-detected them. Before this, `report --scan 1`
+returned no bundles at all, which is what the volume review saw.
+
+### 6. Safe spawns
+
+`pdfinfo` and `ffprobe` `lstat` the path immediately before spawning. Anything that is not a
+regular file is refused with status `failed` and a `NOT_A_REGULAR_FILE` error, without spawning.
+The error carries that code the way `open.ts`'s errors do. The test creates a FIFO: with the
+guard removed the tool blocks on it for its full ten-second deadline before failing, which is the
+behaviour the rule exists to prevent.
+
+### 7. Housekeeping
+
+`report.test.ts` 433 → 343, with the per-report-file tests moved to a new
+`tests/catalogue/report-files.test.ts` (298). `metadata.test.ts` 425 → 383, with the `proc.ts`
+bounds and the runner's concurrency cap moved to a new `tests/catalogue/metadata-proc.test.ts`
+(115). New per-item test files: `metadata-settled` (198), `metadata-large` (170), `metadata-spawn`
+(92), `metadata-encrypted` (80).
+
+### Mutation checks
+
+Every mutation was applied, the owning test file was run, and the change reverted.
+
+| # | Mutation | Result |
+| --- | --- | --- |
+| 1a | `writeReport` stops writing `metadata_failures.csv` | caught (2 tests) |
+| 1b | `renderMarkdown` drops the `## Metadata outcomes` table | caught |
+| 1c | the aggregate query counts only failures, so `ok` is invisible | **not caught, then caught** |
+| 1d | the console line reverts to `metadata ok for N of M` | caught |
+| 1e | `summariseMetadata` drops the `failed` column | caught |
+| 2a | `failed` removed from `SETTLED` (retried forever) | caught |
+| 2b | `timeout` added to `SETTLED` (never retried) | caught |
+| 2c | `unavailable` added to `SETTLED` (never re-probed) | caught (2 tests) |
+| 4a | `epub` reads the whole file again | caught (2 tests) |
+| 4b | the ZIP64 refusal is removed | caught |
+| 4c | the per-entry inflate budget is removed from the seeking reader | caught |
+| 5a | `report` lists only bundles detected by that exact scan | caught |
+| 5b | detection moves `first_seen_scan` forward | caught |
+| 6a | `pdfinfo` spawns without an `lstat` | caught |
+| 6b | `ffprobe` spawns without an `lstat` | caught |
+
+**1c was missed on the first run and the test was strengthened.** The original outcomes test
+asserted `typeof stored.ok === 'number'`, which is true for any number including zero, so a
+mutation that made every `ok` count vanish passed. The test now stages one extraction that
+genuinely succeeds (a real PDF read by `pdfinfo`, skipping when `pdfinfo` is absent) beside one
+that fails (a `.docx` that is not a ZIP), and asserts the exact figures for `stored`, for
+`byExtractor.pdfinfo` and for `byExtractor.office`, plus that `scan.errors` is still 0 beside a
+non-zero `metadata.stored.failed`. That closes the gap the mutation found.
+
+### Interpretation, and files outside the task's list
+
+- `reportSummary` is no longer imported by `cli.ts`. The console line uses the cheaper
+  `storedMetadataOutcomes`; `reportSummary` is still exported and still used by `stats`.
+- `src/catalogue/report-summary.ts` grew a pure `summariseMetadata` fold and the
+  `MetadataOutcomes`/`MetadataSummary`/`MetadataOutcomeRow` types, because both the report and the
+  console need the same fold and neither should own the SQL.
+- `tests/catalogue/cli.test.ts` gained assertions on the new console line, the new `stats` line,
+  `metadata_failures.csv`, and the continued presence of the five older report files.
+- `tests/catalogue/store-subtree.test.ts` constructs a `BundleRow` literal and needed the two new
+  fields; it is the only other constructor.
+- The report directory now holds six files instead of five. Any consumer that enumerates a report
+  directory will see `metadata_failures.csv`.
+- `src/application`, `src/domain`, `src/http`, `ui` and `native` are untouched.
+- `src/shared/result.ts` (the ZIP `Result`) is untouched; `readZipEntryFromHandle` throws rather
+  than returning a `Result`, which is what lets `epub.ts` and `office.ts` drop their `unwrap`
+  helper.
+
+### Deferred
+
+- **The encrypted-PDF path is unproven here: qpdf is not installed on this machine**, so its test
+  skips with a visible reason. Item 3 needs a re-run wherever qpdf exists before Phase 5.
+- Task 6 step 6 (external drive unplug/replug) is still deferred: no drive attached. Phase 5
+  cannot start until it passes on real hardware.

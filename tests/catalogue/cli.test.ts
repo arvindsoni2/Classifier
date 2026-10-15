@@ -112,6 +112,13 @@ describe('catalogue CLI (Phase 1 Task 5)', () => {
     expect(scan.stdout).toMatch(/files/i);
     expect(scan.stdout).toMatch(/elapsed/i);
     expect(scan.stdout).toMatch(/\d+ files/);
+    // Task 8 item 1: the metadata line states this run's work and the stored
+    // outcomes separately, so "0 errors" can never hide a failed extraction.
+    expect(scan.stdout).toMatch(
+      /metadata: \d+ extracted this run, \d+ already settled; stored: \d+ ok, \d+ failed, \d+ timeout, \d+ unavailable/,
+    );
+    // The scan-error figure is named as a scan error, not as "errors" at large.
+    expect(scan.stdout).toMatch(/\d+ (scan )?errors?\.|(scan errors: )?\d+ errors?\./);
 
     const report = runCli(['report', '--config', configPath]);
     expect(report.stderr).toBe('');
@@ -120,7 +127,14 @@ describe('catalogue CLI (Phase 1 Task 5)', () => {
     expect(dirMatch?.[1]).toBeDefined();
     const reportDir = dirMatch?.[1] ?? '';
     expect(reportDir.startsWith(join(dataDir, 'reports'))).toBe(true);
-    for (const file of ['summary.md', 'summary.json', 'duplicates.csv', 'bundles.csv', 'errors.csv']) {
+    for (const file of [
+      'summary.md',
+      'summary.json',
+      'duplicates.csv',
+      'bundles.csv',
+      'errors.csv',
+      'metadata_failures.csv',
+    ]) {
       expect(existsSync(join(reportDir, file))).toBe(true);
     }
 
@@ -128,6 +142,10 @@ describe('catalogue CLI (Phase 1 Task 5)', () => {
     expect(stats.stderr).toBe('');
     expect(stats.code).toBe(0);
     expect(stats.stdout).toMatch(/files/i);
+    // `stats` carries the stored metadata outcomes too.
+    expect(stats.stdout).toMatch(
+      /metadata: \d+ ok, \d+ failed, \d+ timeout, \d+ unavailable/,
+    );
 
     // Nothing inside the scanned root was created, changed or removed.
     expect(snapshot(fixture.root)).toEqual(before);

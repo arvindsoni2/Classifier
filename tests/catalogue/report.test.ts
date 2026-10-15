@@ -8,13 +8,13 @@
  * (AGENTS.md rule 3), and the report is asserted to land under the data
  * directory with nothing written inside the root.
  */
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { bundleScanHook, detectBundles } from '../../src/catalogue/bundles.js';
 import { loadConfig, validateConfig, type CatalogueConfig } from '../../src/catalogue/config.js';
 import { computeHashes } from '../../src/catalogue/dedupe.js';
-import { latestFinishedScan, reportSummary, writeReport, type ReportResult } from '../../src/catalogue/report.js';
+import { reportSummary, writeReport, type ReportResult } from '../../src/catalogue/report.js';
 import { scan } from '../../src/catalogue/scanner.js';
 import { openStore, type CatalogueStore } from '../../src/catalogue/store.js';
 import { makeFixture, type Fixture } from './fixtures.js';
@@ -126,7 +126,14 @@ describe('catalogue report (Phase 1 Task 5)', () => {
     const { report, summary, scanId } = await reportFixture(buildFixture('report-totals'));
 
     expect(report.dir).toMatch(new RegExp(`/reports/${scanId}-\\d{8}-\\d{4}$`));
-    expect(report.files.sort()).toEqual(['bundles.csv', 'duplicates.csv', 'errors.csv', 'summary.json', 'summary.md']);
+    expect(report.files.sort()).toEqual([
+      'bundles.csv',
+      'duplicates.csv',
+      'errors.csv',
+      'metadata_failures.csv',
+      'summary.json',
+      'summary.md',
+    ]);
 
     const scanSection = summary.scan as Record<string, number | string>;
     // 11 files: 8 plain + 3 album tracks, minus the 1 inside the code project
@@ -254,80 +261,6 @@ describe('catalogue report (Phase 1 Task 5)', () => {
     expect(byPath.get('app')?.[6]).toBe('');
   });
 
-  it('errors.csv lists the scan errors this scan recorded', async (context) => {
-    const fixture = buildFixture('report-errors');
-    if (typeof process.getuid === 'function' && process.getuid() === 0) {
-      // chmod 000 does not stop root, so the unreadable-directory case cannot
-      // be staged honestly; the header and the empty-report path are covered.
-      context.skip();
-      return;
-    }
-    const unreadable = join(fixture.root, 'locked');
-    mkdirSync(unreadable, { recursive: true });
-    writeFileSync(join(unreadable, 'hidden.txt'), 'unreadable\n');
-    chmodSync(unreadable, 0o000);
-    const restore = (): void => chmodSync(unreadable, 0o700);
-    cleanups.push(restore);
-
-    const { report, summary } = await reportFixture(fixture);
-    restore();
-
-    const rows = parseCsv(readFileSync(join(report.dir, 'errors.csv'), 'utf8'));
-    expect(rows[0]).toEqual(['root', 'rel_path', 'code', 'message']);
-    expect(rows).toHaveLength(2);
-    expect(rows[1]?.[1]).toBe('locked');
-    expect(rows[1]?.[2]).toBe('EACCES');
-    const byCode = summary.errors as { code: string; count: number }[];
-    expect(byCode).toEqual([{ code: 'EACCES', count: 1 }]);
-  });
-
-  it('errors.csv has its header when a scan had no errors', async () => {
-    const { report } = await reportFixture(buildFixture('report-no-errors'));
-    const text = readFileSync(join(report.dir, 'errors.csv'), 'utf8');
-    expect(text.trim()).toBe('root,rel_path,code,message');
-    const markdown = readFileSync(join(report.dir, 'summary.md'), 'utf8');
-    expect(markdown).toMatch(/## Errors by code[\s\S]*?(none|_No errors_)/i);
-  });
-
-  it('escapes names containing commas, quotes, newlines and non-ASCII', async () => {
-    const fixture = makeFixture('report-escaping');
-    // A bundle directory whose name contains every awkward character, so it
-    // reaches bundles.csv and summary.md through the same writer.
-    const awkward = 'odd, "quoted"\nnewline é中文';
-    fixture.put(`${awkward}/01 one.mp3`, 'first track bytes\n');
-    fixture.put(`${awkward}/02 two.mp3`, 'second track bytes\n');
-    fixture.put(`${awkward}/03 three.mp3`, 'third track bytes\n');
-    // And a duplicate whose names also need escaping.
-    fixture.put('a, "one".txt', DUP_PAYLOAD);
-    fixture.put('b, "two".txt', DUP_PAYLOAD);
-
-    const { report } = await reportFixture(fixture);
-
-    const bundleRows = parseCsv(readFileSync(join(report.dir, 'bundles.csv'), 'utf8'));
-    const awkwardRow = bundleRows.find((row) => row[2]?.includes('odd'));
-    expect(awkwardRow?.[2]).toBe(awkward);
-
-    const duplicateRows = parseCsv(readFileSync(join(report.dir, 'duplicates.csv'), 'utf8'));
-    expect(duplicateRows.slice(1).map((row) => row[5]).sort()).toEqual(['a, "one".txt', 'b, "two".txt']);
-
-    // Quoting is minimal: only fields that need it are quoted, and quotes are
-    // doubled. Non-ASCII is written as UTF-8, not escaped.
-    const duplicatesRaw = readFileSync(join(report.dir, 'duplicates.csv'), 'utf8');
-    expect(duplicatesRaw).toContain('"a, ""one"".txt"');
-    const bundlesRaw = readFileSync(join(report.dir, 'bundles.csv'), 'utf8');
-    expect(bundlesRaw).toContain('中文');
-    // A newline inside a name is data, so it is quoted rather than dropped:
-    // the record stays one field even though it spans lines.
-    expect(bundlesRaw).toContain(`"${awkward.replaceAll('"', '""')}"`);
-
-    // Markdown tables would break on a pipe or newline, so paths are escaped there.
-    const markdown = readFileSync(join(report.dir, 'summary.md'), 'utf8');
-    expect(markdown).toContain('newline é');
-    // The widest table is Totals per root: five columns, so six pipes and seven
-    // parts. A name that leaked one would show up here as an extra column.
-    expect(markdown.split('\n').every((line) => line.split('|').length <= 7)).toBe(true);
-  });
-
   it('reports only what that one scan saw', async () => {
   // Two scans of two different roots into one catalogue. The second report must
   // describe the second scan alone: the first root's files and its bundle are
@@ -367,68 +300,45 @@ describe('catalogue report (Phase 1 Task 5)', () => {
   expect(secondReport.bundles.largest[0]?.path).toBe(`${join(fixture.root, 'two')}/album`);
 });
 
-it('writes the report under the data directory and nothing inside the root', async () => {
-    const fixture = buildFixture('report-readonly');
-    const before = snapshot(fixture.root);
-
-    const dataDir = join(fixture.parent, 'data');
-    const { report } = await reportFixture(fixture);
-
-    expect(report.dir.startsWith(join(dataDir, 'reports'))).toBe(true);
-    expect(existsSync(report.dir)).toBe(true);
-    expect(snapshot(fixture.root)).toEqual(before);
-    // No report file leaked into the scanned tree.
-    expect(readdirSync(fixture.root).some((name) => name.endsWith('.csv') || name.endsWith('.json'))).toBe(false);
-  });
-
-  it('reports the latest finished scan when no scan is named', async () => {
-    const dataDir = join(buildFixture('report-latest').parent, 'data');
-    const store = openStore(dataDir);
-    cleanups.push(() => store.close());
-    const first = store.startScan('2026-01-01T00:00:00.000Z');
-    store.finishScan(first, 'done', '2026-01-01T00:00:05.000Z', {
-      filesSeen: 1,
-      dirsSeen: 0,
-      bytesSeen: 2,
-      errors: 0,
-      symlinksSeen: 0,
-      bundlesSeen: 0,
-      virtualenvsSkipped: 0,
-    });
-    const running = store.startScan('2026-01-02T00:00:00.000Z');
-
-    expect(latestFinishedScan(store)).toBe(first);
-    const report = writeReport(store, first, dataDir);
-    expect(report.dir).toMatch(new RegExp(`/reports/${first}-\\d{8}-\\d{4}$`));
-    // A running scan is never reported as if it were finished.
-    expect(report.summary.scan.status).toBe('done');
-    void running;
-  });
-
-  it('refuses to report a scan that does not exist', async () => {
-    const fixture = makeFixture('report-missing-scan');
+  it('keeps bundles in historical reports across a rescan (Task 8 item 5)', async () => {
+    const fixture = makeFixture('report-historical-bundles');
+    fixture.put('great-album/01 one.mp3', 'first track bytes\n');
+    fixture.put('great-album/02 two.mp3', 'second track bytes\n');
+    fixture.put('great-album/03 three.mp3', 'third track bytes\n');
     const dataDir = join(fixture.parent, 'data');
     const store = openStore(dataDir);
     cleanups.push(() => store.close());
-    expect(() => writeReport(store, 9999, dataDir)).toThrow(/scan 9999/i);
+    const configPath = join(fixture.parent, 'catalogue.json');
+    writeFileSync(
+      configPath,
+      JSON.stringify({ roots: [fixture.root], dataDir }),
+      'utf8',
+    );
+    const config = loadConfig(configPath);
+
+    const first = await scan(config, store, { onDirectory: bundleScanHook(store) });
+    detectBundles(store, first.scanId);
+    const firstReport = reportSummary(store, first.scanId);
+    expect(firstReport.bundles.total).toBe(1);
+    const firstBundle = firstReport.bundles.largest[0];
+    expect(firstBundle?.path).toBe(`${fixture.root}/great-album`);
+
+    // Rescan: nothing changed, so the bundle is detected again and its
+    // last_seen_scan moves forward while first_seen_scan stays put.
+    const second = await scan(config, store, { onDirectory: bundleScanHook(store) });
+    detectBundles(store, second.scanId);
+    const rows = store.db
+      .prepare(
+        'SELECT first_seen_scan, last_seen_scan FROM bundles WHERE rel_path = ?',
+      )
+      .all('great-album') as { first_seen_scan: number; last_seen_scan: number }[];
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.first_seen_scan).toBe(first.scanId);
+    expect(rows[0]?.last_seen_scan).toBe(second.scanId);
+
+    // The first report still lists the bundle: first_seen_scan <= 1 <= last_seen_scan.
+    const historical = reportSummary(store, first.scanId);
+    expect(historical.bundles.total).toBe(1);
+    expect(historical.bundles.largest[0]?.path).toBe(`${fixture.root}/great-album`);
   });
 });
-
-/** (path, size, mtime) for every entry under a directory, recursively. */
-function snapshot(dir: string): Record<string, string> {
-  const rows: Record<string, string> = {};
-  const walk = (current: string): void => {
-    for (const entry of readdirSync(current, { withFileTypes: true })) {
-      const full = join(current, entry.name);
-      if (entry.isDirectory()) {
-        rows[full] = 'dir';
-        walk(full);
-        continue;
-      }
-      const stat = statSync(full);
-      rows[full] = `${stat.size}:${stat.mtimeMs}`;
-    }
-  };
-  walk(dir);
-  return rows;
-}

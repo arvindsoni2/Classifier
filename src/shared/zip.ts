@@ -18,6 +18,7 @@
  * Office's `docProps/core.xml`. Nothing is enumerated into memory.
  */
 import { inflateRawSync } from 'node:zlib';
+import { type FileHandle } from 'node:fs/promises';
 import { err, ok, type Result } from './result.js';
 
 const EOCD_SIGNATURE = 0x06054b50;
@@ -119,4 +120,126 @@ export function readZipEntry(file: Buffer, wanted: string, budget: number): Resu
   const record = findZipEntry(file, wanted);
   if (!record.ok) return record;
   return readZipEntryData(file, record.value, budget);
+}
+
+/** Read at most `length` bytes starting at `position`, from an open descriptor. */
+async function readAt(
+  handle: FileHandle,
+  position: number,
+  length: number,
+  signal?: AbortSignal,
+): Promise<Buffer> {
+  const buffer = Buffer.alloc(length);
+  let filled = 0;
+  while (filled < length) {
+    if (signal?.aborted === true) throw new Error('ZIP read aborted');
+    const { bytesRead } = await handle.read(buffer, filled, length - filled, position + filled);
+    if (bytesRead === 0) break;
+    filled += bytesRead;
+  }
+  return buffer.subarray(0, filled);
+}
+
+/**
+ * Reads one named entry from a ZIP on disk by seeking, without loading the whole
+ * file into memory. Only the end-of-central-directory record, the central
+ * directory and the entry itself are read — a 64 MiB archive with a small
+ * metadata entry costs a handful of bounded reads, not 64 MiB of memory.
+ *
+ * ZIP64 archives are refused outright; this reader does not approximate them.
+ */
+export async function readZipEntryFromHandle(
+  handle: FileHandle,
+  wanted: string,
+  budget: number,
+  signal?: AbortSignal,
+): Promise<Buffer> {
+  const { size } = await handle.stat({ bigint: true });
+  const fileSize = Number(size);
+  if (fileSize === 0) {
+    throw new Error('malformed ZIP: empty file');
+  }
+
+  // The end-of-central-directory record is within the last 65,557 bytes.
+  const scanStart = Math.max(0, fileSize - 65_557);
+  const tail = await readAt(handle, scanStart, fileSize - scanStart, signal);
+  let eocd = -1;
+  let eocdIndex = -1;
+  for (let i = tail.length - 22; i >= 0; i--) {
+    if (tail.readUInt32LE(i) === EOCD_SIGNATURE) {
+      eocd = scanStart + i;
+      eocdIndex = i;
+      break;
+    }
+  }
+  if (eocd < 0) {
+    throw new Error('malformed ZIP: end-of-central-directory record not found (truncated or not a ZIP)');
+  }
+  const entryCount = tail.readUInt16LE(eocdIndex + 10);
+  if (entryCount === 0xffff) {
+    throw new Error('unsupported ZIP64 entry');
+  }
+  const centralOffset = tail.readUInt32LE(eocdIndex + 16);
+  if (centralOffset === 0xffffffff) {
+    throw new Error('unsupported ZIP64 entry');
+  }
+
+  // Walk the central directory looking for `wanted`.
+  let record: ZipEntryRecord | null = null;
+  let offset = centralOffset;
+  for (let i = 0; i < entryCount; i += 1) {
+    const header = await readAt(handle, offset, 46, signal);
+    if (header.length < 46 || header.readUInt32LE(0) !== CENTRAL_SIGNATURE) {
+      throw new Error('malformed ZIP: central directory entry truncated');
+    }
+    const method = header.readUInt16LE(10);
+    const compressedSize = header.readUInt32LE(20);
+    const uncompressedSize = header.readUInt32LE(24);
+    const nameLength = header.readUInt16LE(28);
+    const extraLength = header.readUInt16LE(30);
+    const commentLength = header.readUInt16LE(32);
+    const localOffset = header.readUInt32LE(42);
+    if (localOffset === 0xffffffff || compressedSize === 0xffffffff || uncompressedSize === 0xffffffff) {
+      throw new Error('unsupported ZIP64 entry');
+    }
+    if (offset + 46 + nameLength > fileSize) {
+      throw new Error('malformed ZIP: central directory name truncated');
+    }
+    const name = (await readAt(handle, offset + 46, nameLength, signal)).toString('utf8');
+    offset += 46 + nameLength + extraLength + commentLength;
+    if (name !== wanted) continue;
+    record = { method, compressedSize, uncompressedSize, localOffset };
+    break;
+  }
+  if (record === null) {
+    throw new Error(`ZIP entry ${wanted} not found in the archive`);
+  }
+
+  if (record.uncompressedSize > budget) {
+    throw new Error(
+      `uncompressed entry is ${record.uncompressedSize} bytes, above the ${budget}-byte budget; zip bomb refused`,
+    );
+  }
+
+  // Read the entry's data from its local header.
+  const local = await readAt(handle, record.localOffset, 30, signal);
+  if (local.length < 30 || local.readUInt32LE(0) !== LOCAL_SIGNATURE) {
+    throw new Error('malformed ZIP: local header not found at the recorded offset');
+  }
+  const localNameLength = local.readUInt16LE(26);
+  const localExtraLength = local.readUInt16LE(28);
+  const dataStart = record.localOffset + 30 + localNameLength + localExtraLength;
+  if (dataStart + record.compressedSize > fileSize) {
+    throw new Error('malformed ZIP: entry data runs past the end of the file');
+  }
+  const data = await readAt(handle, dataStart, record.compressedSize, signal);
+  if (record.method === 0) return data;
+  if (record.method === 8) {
+    try {
+      return inflateRawSync(data, { maxOutputLength: budget });
+    } catch {
+      throw new Error('malformed ZIP: deflate stream failed to decompress');
+    }
+  }
+  throw new Error(`unsupported ZIP compression method ${record.method}`);
 }

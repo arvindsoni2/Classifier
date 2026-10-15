@@ -38,6 +38,8 @@ export interface BundleRowView {
   memberCount: number | null;
   totalSize: number | null;
   detectedScan: number;
+  firstSeenScan: number;
+  lastSeenScan: number;
 }
 
 export interface BundleDetection {
@@ -70,6 +72,8 @@ export function bundleScanHook(store: CatalogueStore): NonNullable<ScanHooks['on
       memberCount: null,
       totalSize: null,
       detectedScan: dir.scanId,
+      firstSeenScan: dir.scanId,
+      lastSeenScan: dir.scanId,
     });
     return false;
   };
@@ -235,6 +239,8 @@ function writeBundle(store: CatalogueStore, scanId: number, node: TreeNode, matc
     memberCount: match.memberCount,
     totalSize: match.totalSize,
     detectedScan: scanId,
+    firstSeenScan: scanId,
+    lastSeenScan: scanId,
   });
   store.setDirBundle(node.id, bundleId);
   store.setItemsBundle(node.id, bundleId);
@@ -258,6 +264,8 @@ function writeArchiveBundle(
     memberCount: stats.files,
     totalSize: stats.bytes,
     detectedScan: scanId,
+    firstSeenScan: scanId,
+    lastSeenScan: scanId,
   });
   store.setDirBundle(node.id, bundleId);
   // Only files no other bundle claimed: a nested album keeps its own members.
@@ -273,7 +281,9 @@ export function listBundles(store: CatalogueStore): BundleRowView[] {
       `SELECT id, root_id AS rootId, rel_path AS relPath, type,
               parent_bundle_id AS parentBundleId, rule,
               member_count AS memberCount, total_size AS totalSize,
-              detected_scan AS detectedScan
+              detected_scan AS detectedScan,
+              first_seen_scan AS firstSeenScan,
+              last_seen_scan AS lastSeenScan
        FROM bundles ORDER BY root_id, rel_path`,
     )
     .all() as BundleRowView[];

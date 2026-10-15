@@ -9,6 +9,8 @@
  */
 import type { Extractor } from './types.js';
 import { runTool } from './proc.js';
+import { NOT_A_REGULAR_FILE } from '../open.js';
+import { lstat } from 'node:fs/promises';
 
 const VERSION = 'ffprobe@1.0.0';
 const TOOL = 'ffprobe';
@@ -83,6 +85,14 @@ export const ffprobeExtractor: Extractor = {
   },
 
   async extract(absPath, signal) {
+    // Never spawn a tool for something that is not a regular file.
+    const stat = await lstat(absPath).catch(() => null);
+    if (stat !== null && !stat.isFile()) {
+      const error = new Error(`${NOT_A_REGULAR_FILE}: ${absPath} is not a regular file`) as Error & { code?: string };
+      error.code = NOT_A_REGULAR_FILE;
+      throw error;
+    }
+
     const run = await runTool(
       TOOL,
       ['-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', absPath],

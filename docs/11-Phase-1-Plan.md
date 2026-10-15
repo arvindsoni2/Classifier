@@ -281,3 +281,59 @@ except `src/shared/zip.ts`'s import as listed in item 8.
 **Deferred by Arvind on 2026-10-15: no drive available.** The offline, unmounted-mount-point,
 volume-changed and probe-failure paths are proven on fixtures only. Phase 5 may not start until this step
 has run on a real external drive and passed (spec §Phase 5).
+
+## Task 8 — Report truth
+
+One session, one commit. Close the report/metadata should-fix items from both Phase 1 reviews so the
+report tells the truth about what is stored. Tests first, mutation-check items 1, 2, 4, 5 and 6 before
+committing. `pnpm typecheck && pnpm lint && pnpm test` must pass. Do not push.
+
+**Files:** `src/catalogue/metadata/index.ts`, `.../pdfinfo.ts`, `.../epub.ts`, `.../office.ts`,
+`src/catalogue/report.ts`, `src/catalogue/report-format.ts`, `src/catalogue/report-summary.ts`,
+`src/catalogue/cli.ts`, `src/catalogue/store.ts`, `src/catalogue/store-extras.ts`,
+`src/catalogue/schema.sql`, `src/catalogue/migrate.ts`, `src/shared/zip.ts`, `src/shared/errors.ts`,
+`tests/catalogue/metadata.test.ts`, `tests/catalogue/report.test.ts`, `tests/catalogue/report-metadata.test.ts`,
+`tests/catalogue/metadata-settled.test.ts`, `tests/catalogue/metadata-encrypted.test.ts`,
+`tests/catalogue/metadata-large.test.ts`, `tests/catalogue/metadata-spawn.test.ts`,
+`tests/catalogue/report-errors.test.ts`.
+
+**Out of scope:** a `series` bundle type, Python-project markers (both Phase 3). No new dependencies.
+Do not touch `src/application`, `src/domain`, `src/http`, `ui` or `native`. Do not run the CLI against any real root.
+
+1. **Metadata outcomes are visible.** summary.md, summary.json and `stats` show, per extractor
+   (ffprobe, pdfinfo, exif, epub, office), the stored counts for present items: ok, failed, timeout,
+   unavailable. Count what is stored, not what ran this scan. Add `metadata_failures.csv` (item path,
+   extractor, status, error) beside `errors.csv`. Scan errors and metadata failures stay separate
+   figures and are labelled as such: "0 scan errors" next to "87 metadata failures" is honest;
+   "0 errors" on its own is not.
+   The console line becomes: "metadata: <n> extracted this run, <n> already settled; stored: <ok> ok,
+   <failed> failed, <timeout> timeout, <unavailable> unavailable".
+
+2. **Deterministic failures settle.** `failed` joins `ok` as settled, so it is not retried while the
+   item is unchanged. A changed file already drops its metadata rows, so it is retried then.
+   `timeout` and `unavailable` are still retried every scan.
+
+3. **An encrypted PDF is `ok`.** When pdfinfo reports encryption or fails only because the file is
+   password-protected, record status ok with fields { encrypted: true } and whatever pdfinfo did
+   report. Test with a synthetic encrypted PDF (built with qpdf if present, otherwise skip with a
+   visible reason).
+
+4. **Large EPUB and Office files.** epub.ts and office.ts stop reading the whole file. Read the ZIP
+   end-of-central-directory and central directory by seeking (through openRegularFile, bounded reads),
+   then read only the entries needed (container.xml, the OPF, docProps/core.xml). Keep
+   ZIP_INFLATE_BUDGET_BYTES as the per-entry cap. No ZIP64 support needed: record a clear failure if
+   the archive needs it. Test: a synthetic EPUB padded past 64 MiB with a stored filler entry gets
+   its title and author.
+
+5. **Historical reports keep their bundles.** Add first_seen_scan and last_seen_scan to bundles
+   (additive migration; backfill both from detected_scan). Detection updates last_seen_scan and never
+   moves first_seen_scan. `report --scan N` lists bundles with first_seen_scan <= N <= last_seen_scan.
+   Test: scan, rescan, then `report --scan 1` still lists the bundles.
+
+6. **Safe spawns.** Just before spawning ffprobe or pdfinfo, lstat the path; skip anything that is not
+   a regular file with status failed and a NOT_A_REGULAR_FILE error, without spawning.
+
+7. **Housekeeping.** Split metadata.test.ts and report.test.ts below 400 lines.
+
+**Commit:** `feat(catalogue): honest metadata outcomes, seeking ZIP reads and stable bundle history`.
+

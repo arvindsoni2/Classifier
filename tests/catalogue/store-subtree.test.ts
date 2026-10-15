@@ -112,6 +112,8 @@ function worldWith(specs: readonly DirSpec[]): World {
         memberCount: null,
         totalSize: null,
         detectedScan: scanId,
+        firstSeenScan: scanId,
+        lastSeenScan: scanId,
       }),
   };
 }

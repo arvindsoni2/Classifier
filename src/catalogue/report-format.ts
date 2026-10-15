@@ -55,6 +55,28 @@ export interface ErrorRow {
   message: string;
 }
 
+/** One metadata row that did not extract successfully, for metadata_failures.csv. */
+export interface MetadataFailureRow {
+  root_path: string;
+  rel_path: string;
+  extractor: string;
+  status: string;
+  fieldsJson: string;
+}
+
+/** The error message stored with a failed metadata row, or empty when none. */
+function failureError(row: MetadataFailureRow): string {
+  try {
+    const parsed = JSON.parse(row.fieldsJson);
+    if (typeof parsed === 'object' && parsed !== null && typeof (parsed as Record<string, unknown>).error === 'string') {
+      return (parsed as Record<string, unknown>).error as string;
+    }
+  } catch {
+    // Not JSON this module wrote: show nothing rather than invent an error.
+  }
+  return '';
+}
+
 /** How many rows the Markdown sections keep, per the plan. */
 export const LARGEST_FILES_IN_SUMMARY = 20;
 export const LARGEST_GROUPS_IN_SUMMARY = 30;
@@ -127,6 +149,15 @@ export function renderBundlesCsv(bundles: BundleRow[]): string {
 export function renderErrorsCsv(errors: ErrorRow[]): string {
   const lines = ['root,rel_path,code,message'];
   for (const error of errors) lines.push(csvLine([error.root_path, error.rel_path, error.code, error.message]));
+  return `${lines.join('\n')}\n`;
+}
+
+/** item path, extractor, status, error — metadata failures only, never scan errors. */
+export function renderMetadataFailuresCsv(failures: MetadataFailureRow[]): string {
+  const lines = ['root,rel_path,extractor,status,error'];
+  for (const failure of failures) {
+    lines.push(csvLine([failure.root_path, failure.rel_path, failure.extractor, failure.status, failureError(failure)]));
+  }
   return `${lines.join('\n')}\n`;
 }
 
@@ -255,6 +286,16 @@ export function renderMarkdown(summary: ReportSummary): string {
     `## Errors by code\n\n${renderRows(
       ['Code', 'Count'],
       summary.errors.map((error) => [error.code, error.count]),
+    )}`,
+    `## Metadata outcomes\n\n${renderRows(
+      ['Extractor', 'OK', 'Failed', 'Timeout', 'Unavailable'],
+      Object.entries(summary.metadata.byExtractor).map(([name, counts]) => [
+        name,
+        counts.ok,
+        counts.failed,
+        counts.timeout,
+        counts.unavailable,
+      ]),
     )}`,
   ]
     .join('\n\n')

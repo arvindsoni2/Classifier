@@ -93,7 +93,7 @@ interface ExistingRow {
 }
 
 /** Statuses that mean "nothing more to do for this item and extractor". */
-const SETTLED: ReadonlySet<string> = new Set(['ok', 'unavailable']);
+const SETTLED: ReadonlySet<string> = new Set(['ok', 'failed']);
 
 /**
  * Runs the extractors over a finished scan. Returns the summary; per-item

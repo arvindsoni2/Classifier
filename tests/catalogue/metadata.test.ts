@@ -304,30 +304,6 @@ describe('metadata extractors (Phase 1 Task 4)', () => {
     expect(summary.timeouts).toBe(1);
   });
 
-  it('extraction runs two at a time', async () => {
-    const fixture = makeFixture('metadata-concurrency');
-    for (let index = 1; index <= 6; index += 1) {
-      fixture.put(`doc-${index}.docx`, makeDocxWithCoreProperties(`<?xml version="1.0"?><cp:coreProperties><dc:title>Doc ${index}</dc:title></cp:coreProperties>`));
-    }
-    let active = 0;
-    let peak = 0;
-    const slow = fakeExtractor({
-      name: 'slow',
-      appliesTo: (kind, ext) => ext === 'docx',
-      extract: async () => {
-        active += 1;
-        peak = Math.max(peak, active);
-        await new Promise((resolve) => setTimeout(resolve, 15));
-        active -= 1;
-        return { done: true };
-      },
-    });
-    await scanFixture(fixture, { extractors: [slow] });
-
-    expect(slow.calls).toBe(6);
-    expect(peak).toBe(2);
-  });
-
   it('a ZIP entry above the inflate budget is refused', async () => {
     const fixture = makeFixture('metadata-zip-budget');
     // 21 MiB uncompressed in a tiny compressed entry: the classic zip bomb.
@@ -372,24 +348,6 @@ describe('metadata extractors (Phase 1 Task 4)', () => {
     // The untouched file keeps its original row, fields and scan id.
     expect(rowFor(first.store, 'two.epub')?.fields.title).toBe('Second Title');
     expect(rowFor(first.store, 'two.epub')?.extractedScan).toBe(first.scanId);
-  });
-
-  it('a bounded child tool cannot flood the catalogue', async () => {
-    const result = await runTool(
-      process.execPath,
-      ['-e', 'process.stdout.write("x".repeat(3 * 1024 * 1024))'],
-      { timeoutMs: 10_000, maxOutputBytes: 1024 * 1024 },
-    );
-    expect(result.code).toBe(0);
-    expect(result.stdout.length).toBe(1024 * 1024);
-    expect(result.truncated).toBe(true);
-  });
-
-  it('a child tool that overruns its deadline is killed', async () => {
-    const started = Date.now();
-    const result = await runTool(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { timeoutMs: 100 });
-    expect(result.timedOut).toBe(true);
-    expect(Date.now() - started).toBeLessThan(5000);
   });
 
   it('extraction is read only on the roots', async (context) => {

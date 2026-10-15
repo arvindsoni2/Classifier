@@ -24,12 +24,19 @@ import {
   renderDuplicatesCsv,
   renderErrorsCsv,
   renderMarkdown,
+  renderMetadataFailuresCsv,
   type BundleRow,
   type ErrorRow,
   type ItemRow,
+  type MetadataFailureRow,
   type ScanRow,
 } from './report-format.js';
-import type { ReportSummary } from './report-summary.js';
+import {
+  summariseMetadata,
+  type MetadataOutcomeRow,
+  type MetadataSummary,
+  type ReportSummary,
+} from './report-summary.js';
 import type { BundleType, CatalogueStore } from './store.js';
 
 export type { ReportSummary } from './report-summary.js';
@@ -49,6 +56,8 @@ interface ReportData {
   items: ItemRow[];
   bundles: BundleRow[];
   errors: ErrorRow[];
+  metadata: MetadataOutcomeRow[];
+  metadataFailures: MetadataFailureRow[];
   duplicates: DuplicateGroup[];
 }
 
@@ -100,7 +109,7 @@ function readReportData(store: CatalogueStore, scanId: number): ReportData {
               b.member_count, b.total_size, b.rule
        FROM bundles b JOIN roots r ON r.id = b.root_id
        LEFT JOIN bundles p ON p.id = b.parent_bundle_id
-       WHERE b.detected_scan = @scanId
+       WHERE b.first_seen_scan <= @scanId AND b.last_seen_scan >= @scanId
        ORDER BY r.path, b.rel_path`,
     )
     .all({ scanId }) as BundleRow[];
@@ -114,7 +123,29 @@ function readReportData(store: CatalogueStore, scanId: number): ReportData {
     )
     .all({ scanId }) as ErrorRow[];
 
-  return { scan, roots: readRoots(store, scanId, items), items, bundles, errors, duplicates: duplicateGroups(store, scanId) };
+  const metadata = storedMetadataRows(store, scanId);
+
+  const metadataFailures = store.db
+    .prepare(
+      `SELECT r.path AS root_path, i.rel_path AS rel_path, m.extractor AS extractor,
+              m.status AS status, m.fields_json AS fieldsJson
+       FROM metadata m JOIN items i ON i.id = m.item_id
+       JOIN roots r ON r.id = i.root_id
+       WHERE i.last_seen_scan = @scanId AND i.status = 'present' AND m.status <> 'ok'
+       ORDER BY r.path, i.rel_path, m.extractor`,
+    )
+    .all({ scanId }) as MetadataFailureRow[];
+
+  return {
+    scan,
+    roots: readRoots(store, scanId, items),
+    items,
+    bundles,
+    errors,
+    metadata,
+    metadataFailures,
+    duplicates: duplicateGroups(store, scanId),
+  };
 }
 
 /**
@@ -185,23 +216,65 @@ function readRoots(store: CatalogueStore, scanId: number, items: ItemRow[]): Roo
  */
 export function reportSummary(store: CatalogueStore, scanId: number): ReportSummary {
   const data = readReportData(store, scanId);
-  return buildSummary(data.scan, data.roots, data.items, data.bundles, data.errors, data.duplicates);
+  return buildSummary(data.scan, data.roots, data.items, data.bundles, data.errors, data.metadata, data.duplicates);
 }
 
 /** Writes every report file for `scanId` under `dataDir`. */
 export function writeReport(store: CatalogueStore, scanId: number, dataDir: string): ReportResult {
   const data = readReportData(store, scanId);
-  const summary = buildSummary(data.scan, data.roots, data.items, data.bundles, data.errors, data.duplicates);
+  const summary = buildSummary(data.scan, data.roots, data.items, data.bundles, data.errors, data.metadata, data.duplicates);
 
   const dir = reportDirFor(dataDir, scanId, new Date(data.scan.started_at));
   mkdirSync(dir, { recursive: true });
-  const files = ['summary.md', 'summary.json', 'duplicates.csv', 'bundles.csv', 'errors.csv'];
+  const files = [
+    'summary.md',
+    'summary.json',
+    'duplicates.csv',
+    'bundles.csv',
+    'errors.csv',
+    'metadata_failures.csv',
+  ];
   writeFileSync(join(dir, 'summary.json'), `${JSON.stringify(summary, null, 2)}\n`, 'utf8');
   writeFileSync(join(dir, 'summary.md'), renderMarkdown(summary), 'utf8');
   writeFileSync(join(dir, 'duplicates.csv'), renderDuplicatesCsv(data.duplicates, data.items), 'utf8');
   writeFileSync(join(dir, 'bundles.csv'), renderBundlesCsv(data.bundles), 'utf8');
   writeFileSync(join(dir, 'errors.csv'), renderErrorsCsv(data.errors), 'utf8');
+  writeFileSync(
+    join(dir, 'metadata_failures.csv'),
+    renderMetadataFailuresCsv(data.metadataFailures),
+    'utf8',
+  );
   return { dir, files, summary };
+}
+
+/**
+ * The stored metadata rows for the present items of one scan, one row per
+ * (extractor, status).
+ *
+ * It counts what is *stored*, not what ran this run: a `failed` row from an
+ * earlier scan still counts here, because `failed` is settled and is not retried
+ * while the item is unchanged. Items that are absent, or were not seen by this
+ * scan, contribute nothing.
+ */
+export function storedMetadataRows(store: CatalogueStore, scanId: number): MetadataOutcomeRow[] {
+  return store.db
+    .prepare(
+      `SELECT m.extractor AS extractor, m.status AS status, COUNT(*) AS count
+       FROM metadata m JOIN items i ON i.id = m.item_id
+       WHERE i.last_seen_scan = @scanId AND i.status = 'present'
+       GROUP BY m.extractor, m.status`,
+    )
+    .all({ scanId }) as MetadataOutcomeRow[];
+}
+
+/**
+ * The stored metadata outcomes of one scan, as a report would print them.
+ *
+ * Separate from `reportSummary` so the console line can state them without also
+ * computing kinds, bundles and duplicate groups over every item.
+ */
+export function storedMetadataOutcomes(store: CatalogueStore, scanId: number): MetadataSummary {
+  return summariseMetadata(storedMetadataRows(store, scanId));
 }
 
 function buildSummary(
@@ -210,6 +283,7 @@ function buildSummary(
   items: ItemRow[],
   bundles: BundleRow[],
   errors: ErrorRow[],
+  metadata: MetadataOutcomeRow[],
   duplicates: DuplicateGroup[],
 ): ReportSummary {
   // Only the per-kind figures come from the items: the roots are already known,
@@ -256,6 +330,7 @@ function buildSummary(
       filesHashed: scan.files_hashed,
       errors: scan.errors,
     },
+    metadata: summariseMetadata(metadata),
     roots: roots.slice().sort((a, b) => b.bytes - a.bytes),
     kinds: [...kinds.values()].sort((a, b) => b.bytes - a.bytes),
     bundles: {

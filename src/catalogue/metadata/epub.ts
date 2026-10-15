@@ -8,10 +8,9 @@
  * the extraction adapter.
  */
 import type { Extractor } from './types.js';
-import { readFileBounded, MAX_EXTRACTOR_INPUT_BYTES } from './readfile.js';
+import { openRegularFile } from '../open.js';
 import { elementAttribute, elementText } from '../../shared/xml.js';
-import { readZipEntry, ZIP_INFLATE_BUDGET_BYTES } from '../../shared/zip.js';
-import type { Result } from '../../domain/contracts.js';
+import { readZipEntryFromHandle, ZIP_INFLATE_BUDGET_BYTES } from '../../shared/zip.js';
 
 /** OPF metadata elements, mapped to the catalogue's field names. */
 const OPF_FIELDS: readonly (readonly [string, string])[] = [
@@ -22,11 +21,6 @@ const OPF_FIELDS: readonly (readonly [string, string])[] = [
   ['publisher', 'publisher'],
   ['date', 'date'],
 ];
-
-function unwrap<T>(result: Result<T>): T {
-  if (!result.ok) throw new Error(result.detail);
-  return result.value;
-}
 
 export const epubExtractor: Extractor = {
   name: 'epub',
@@ -42,23 +36,26 @@ export const epubExtractor: Extractor = {
   },
 
   async extract(absPath, signal) {
-    const bytes = await readFileBounded(absPath, MAX_EXTRACTOR_INPUT_BYTES, signal);
+    const handle = await openRegularFile(absPath);
+    try {
+      const container = await readZipEntryFromHandle(handle, 'META-INF/container.xml', ZIP_INFLATE_BUDGET_BYTES, signal);
+      const opfPath = elementAttribute(container, 'rootfile', 'full-path');
+      if (opfPath === undefined || opfPath === '') {
+        throw new Error('EPUB container names no package document');
+      }
 
-    const container = unwrap(readZipEntry(bytes, 'META-INF/container.xml', ZIP_INFLATE_BUDGET_BYTES));
-    const opfPath = elementAttribute(container, 'rootfile', 'full-path');
-    if (opfPath === undefined || opfPath === '') {
-      throw new Error('EPUB container names no package document');
+      const opf = await readZipEntryFromHandle(handle, opfPath, ZIP_INFLATE_BUDGET_BYTES, signal);
+      const fields: Record<string, unknown> = {};
+      for (const [element, field] of OPF_FIELDS) {
+        const value = elementText(opf, element);
+        if (value !== undefined && value !== '') fields[field] = value;
+      }
+      if (Object.keys(fields).length === 0) {
+        throw new Error(`EPUB package document ${opfPath} carries no metadata elements`);
+      }
+      return fields;
+    } finally {
+      await handle.close();
     }
-
-    const opf = unwrap(readZipEntry(bytes, opfPath, ZIP_INFLATE_BUDGET_BYTES));
-    const fields: Record<string, unknown> = {};
-    for (const [element, field] of OPF_FIELDS) {
-      const value = elementText(opf, element);
-      if (value !== undefined && value !== '') fields[field] = value;
-    }
-    if (Object.keys(fields).length === 0) {
-      throw new Error(`EPUB package document ${opfPath} carries no metadata elements`);
-    }
-    return fields;
   },
 };

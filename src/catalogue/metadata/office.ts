@@ -7,10 +7,9 @@
  * ZIP64 refusal apply as they do everywhere else.
  */
 import type { Extractor } from './types.js';
-import { readFileBounded, MAX_EXTRACTOR_INPUT_BYTES } from './readfile.js';
+import { openRegularFile } from '../open.js';
 import { elementText } from '../../shared/xml.js';
-import { readZipEntry, ZIP_INFLATE_BUDGET_BYTES } from '../../shared/zip.js';
-import type { Result } from '../../domain/contracts.js';
+import { readZipEntryFromHandle, ZIP_INFLATE_BUDGET_BYTES } from '../../shared/zip.js';
 
 const OFFICE_EXTENSIONS: ReadonlySet<string> = new Set(['docx', 'xlsx', 'pptx']);
 
@@ -23,11 +22,6 @@ const CORE_FIELDS: readonly (readonly [string, string])[] = [
   ['created', 'created'],
   ['modified', 'modified'],
 ];
-
-function unwrap<T>(result: Result<T>): T {
-  if (!result.ok) throw new Error(result.detail);
-  return result.value;
-}
 
 export const officeExtractor: Extractor = {
   name: 'office',
@@ -42,14 +36,17 @@ export const officeExtractor: Extractor = {
   },
 
   async extract(absPath, signal) {
-    const bytes = await readFileBounded(absPath, MAX_EXTRACTOR_INPUT_BYTES, signal);
-    const core = unwrap(readZipEntry(bytes, 'docProps/core.xml', ZIP_INFLATE_BUDGET_BYTES));
-
-    const fields: Record<string, unknown> = {};
-    for (const [element, field] of CORE_FIELDS) {
-      const value = elementText(core, element);
-      if (value !== undefined && value !== '') fields[field] = value;
+    const handle = await openRegularFile(absPath);
+    try {
+      const core = await readZipEntryFromHandle(handle, 'docProps/core.xml', ZIP_INFLATE_BUDGET_BYTES, signal);
+      const fields: Record<string, unknown> = {};
+      for (const [element, field] of CORE_FIELDS) {
+        const value = elementText(core, element);
+        if (value !== undefined && value !== '') fields[field] = value;
+      }
+      return fields;
+    } finally {
+      await handle.close();
     }
-    return fields;
   },
 };

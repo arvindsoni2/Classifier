@@ -46,4 +46,59 @@ export interface ReportSummary {
   };
   incomplete: { path: string; size: number }[];
   errors: { code: string; count: number }[];
+
+  /** Stored metadata outcomes for the present items of this scan, per extractor.
+   * Counts what is in the catalogue, not what ran this run: a `failed` row from an
+   * earlier scan still counts as `failed` here because it is settled. */
+  metadata: MetadataSummary;
+}
+
+/** One extractor's stored outcomes, and the four figures a report prints for it. */
+export interface MetadataOutcomes {
+  ok: number;
+  failed: number;
+  timeout: number;
+  unavailable: number;
+}
+
+export interface MetadataSummary {
+  /** Every stored row for the present items of this scan, all extractors together. */
+  stored: MetadataOutcomes;
+  /** The same rows split by extractor. An extractor with no row is absent. */
+  byExtractor: Record<string, MetadataOutcomes>;
+}
+
+/** One row of the metadata aggregate: how many rows an extractor has in a status. */
+export interface MetadataOutcomeRow {
+  extractor: string;
+  status: string;
+  count: number;
+}
+
+const OUTCOME_STATUSES: readonly (keyof MetadataOutcomes)[] = ['ok', 'failed', 'timeout', 'unavailable'];
+
+function emptyOutcomes(): MetadataOutcomes {
+  return { ok: 0, failed: 0, timeout: 0, unavailable: 0 };
+}
+
+/**
+ * Folds the metadata aggregate into totals and per-extractor figures.
+ *
+ * A status outside the four known ones is counted nowhere rather than being
+ * invented as a fifth column: `metadata.status` is a CHECK constraint, so an
+ * unknown value means the schema and this module disagree, and that should be
+ * visible rather than silently folded into `ok`.
+ */
+export function summariseMetadata(rows: readonly MetadataOutcomeRow[]): MetadataSummary {
+  const stored = emptyOutcomes();
+  const byExtractor = new Map<string, MetadataOutcomes>();
+  for (const row of rows) {
+    const status = OUTCOME_STATUSES.find((candidate) => candidate === row.status);
+    if (status === undefined) continue;
+    const bucket = byExtractor.get(row.extractor) ?? emptyOutcomes();
+    bucket[status] += Number(row.count);
+    stored[status] += Number(row.count);
+    byExtractor.set(row.extractor, bucket);
+  }
+  return { stored, byExtractor: Object.fromEntries(byExtractor) };
 }

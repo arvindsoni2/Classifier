@@ -18,12 +18,12 @@ import type { BundleRow, MetadataRow } from './store.js';
 /** Inserts or updates one bundle, returning its id. */
 export function upsertBundle(db: Database.Database, row: BundleRow): number {
   db.prepare(
-    `INSERT INTO bundles (root_id, rel_path, type, parent_bundle_id, rule, member_count, total_size, detected_scan)
-     VALUES (@rootId, @relPath, @type, @parentBundleId, @rule, @memberCount, @totalSize, @detectedScan)
+    `INSERT INTO bundles (root_id, rel_path, type, parent_bundle_id, rule, member_count, total_size, detected_scan, first_seen_scan, last_seen_scan)
+     VALUES (@rootId, @relPath, @type, @parentBundleId, @rule, @memberCount, @totalSize, @detectedScan, @firstSeenScan, @lastSeenScan)
      ON CONFLICT (root_id, rel_path) DO UPDATE SET
        type = excluded.type, parent_bundle_id = excluded.parent_bundle_id, rule = excluded.rule,
        member_count = excluded.member_count, total_size = excluded.total_size,
-       detected_scan = excluded.detected_scan`,
+       detected_scan = excluded.detected_scan, last_seen_scan = excluded.last_seen_scan`,
   ).run(row);
   const found = db
     .prepare('SELECT id FROM bundles WHERE root_id = ? AND rel_path = ?')

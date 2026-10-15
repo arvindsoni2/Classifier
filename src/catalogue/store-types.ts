@@ -72,6 +72,9 @@ export interface BundleRow {
   memberCount: number | null;
   totalSize: number | null;
   detectedScan: number;
+  /** The first and last scans that detected this bundle. */
+  firstSeenScan: number;
+  lastSeenScan: number;
 }
 
 export type MetadataStatus = 'ok' | 'unavailable' | 'failed' | 'timeout';
