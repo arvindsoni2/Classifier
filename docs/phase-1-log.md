@@ -722,3 +722,97 @@ naming because a rescan will show them:
 A rescan after these three fixes will mark the 19,287 virtualenv items `missing`,
 which is correct — rows are kept, never deleted — but it will look like a large
 drop in item count. Expected: about 4,036 items and 536 duplicate groups remain.
+
+---
+
+## Task 1a — Volume seam, store migration and device-number churn
+
+Plan Task 1, first of two sessions (the plan splits it; spec D31). Commits
+`f1cd4ec` then `35fc8ef`.
+
+**Tests:** 303 pass (297 before, +6). `pnpm typecheck`, `pnpm lint` and
+`pnpm test` all pass.
+
+### What this session does
+
+The scanner takes a `VolumeProbe`. Once per root it records the volume's uuid,
+label, filesystem type, mount point and identity mode, and writes a `scan_roots`
+row so a report can say which drives a scan covered. A probe reporting a root
+missing records it `offline` and skips it — no item is touched, and nothing it
+holds is marked missing, because an absent drive is not a deleted directory.
+**A scan without a probe behaves exactly as before**, so the CLI path is
+unchanged until 1b supplies the real `findmnt` probe. That is why the volume
+types live in `scanner.ts` for now: `volume.ts` is 1b's file, and moving them
+twice would be churn.
+
+Config accepts a root that does not exist. A path that exists but is not a
+directory is still refused, as are relative paths, nested roots and a `dataDir`
+inside a root.
+
+### Two defects found and fixed on the way
+
+1. **`dev` was part of the cross-scan identity check.** A USB drive gets a new
+   device number every time it is plugged in, so comparing `dev` across scans
+   would re-hash an entire external volume on every run — precisely the cost
+   D31 exists to remove. It is now out of the comparison, and still used within
+   a scan for `MOUNT_BOUNDARY`, where it means something.
+2. **A catalogue created before volumes could not be opened.** `CREATE TABLE IF
+   NOT EXISTS` cannot widen an existing table, so the real catalogue on this
+   machine would have opened with the old `roots` shape and every volume write
+   would fail against it. Fixed with an additive `ALTER TABLE` migration, one
+   column at a time and only when absent: existing rows and history are
+   untouched and read as null until the next scan records them.
+
+### Decisions and interpretations
+
+1. **Offline handling is in 1a; volume-change and path mode are not.** The plan
+   puts "the offline, volume-changed and path-mode behaviour" in 1b, but a
+   config that accepts a missing root needs *some* answer for it, and "skipped,
+   nothing touched" is the only safe one. The rest of the table — the unmounted
+   mount point, retiring a reformatted volume, and the path-mode comparison —
+   stays in 1b.
+2. **A missing root keeps its lexical path.** `validateConfig` realpaths a root
+   that exists, so a symlinked root still compares against what it really is. A
+   path that does not exist has nothing to resolve, and inventing one would make
+   the config's idea of a root disagree with the store's.
+3. **The offline root is written with `dev`/`ino` of `'0'`.** Those columns are
+   `NOT NULL` and mean nothing for a drive that is not there. They are no longer
+   compared across scans, so this cannot mislead anything.
+4. **`rootsOnline` counts roots walked.** Without a probe the result says one
+   root was online while the row says `status IS NULL`: the counter describes
+   what the scan did, the column describes what the probe knew. Once 1b wires
+   the real probe the two agree, and the test says which is which.
+5. **Identity-mode tests drive the store.** The plan's
+   `path_mode_ignores_inode_changes` says "fake stat", but only `VolumeProbe` is
+   defined as a seam. Varying inode numbers honestly needs either a stat seam or
+   testing the comparison where it lives — and the comparison is in
+   `upsertItems`. The device-number test drives it the same way: craft the rows,
+   re-upsert, assert the hashes survived.
+
+### Changed outside the task's file list
+
+Three new files, all forced by AGENTS.md rule 9 once the volume work pushed
+`store.ts` to 472 lines and `scanner.ts` to 429:
+
+| File | Concern | Why the split is real |
+| --- | --- | --- |
+| `store-types.ts` | row shapes and the `CatalogueStore` contract | declarations say what a row is; `store.ts` says how it reaches SQLite |
+| `store-extras.ts` | SQL for `bundles` and `metadata` | the two tables that point at rows another stage owns |
+| `list-directory.ts` | reading and classifying one directory's entries | a different question from where the walk goes next |
+
+`migrate.ts` holds the schema migration, a distinct concern from opening a
+database. `store.ts` re-exports every type it used to export, so no caller
+changed. Behaviour is identical: the same 303 tests pass, and 1a's mutation
+checks still hold against the new layout.
+
+### Deferred to Task 1b
+
+- The real `findmnt` probe, and wiring it into the CLI.
+- `unmounted_mount_point_is_offline`, `volume_change_retires_old_items`,
+  the `path_mode_*` tests, and `default_probe_parses_findmnt`.
+- The report's per-root volume section: `scan_roots` holds the data, but
+  Task 5's report does not show it yet.
+
+### Still open
+
+The Phase 1 review's nine "should fix" items are untouched.
