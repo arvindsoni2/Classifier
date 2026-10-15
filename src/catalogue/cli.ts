@@ -24,6 +24,7 @@ import { computeHashes } from './dedupe.js';
 import { defaultVolumeProbe } from './volume.js';
 import { extractMetadata } from './metadata/index.js';
 import { latestFinishedScan, reportSummary, writeReport } from './report.js';
+import { rootStatusText } from './report-format.js';
 import { scan } from './scanner.js';
 import { openStore } from './store.js';
 
@@ -239,13 +240,17 @@ function runReadOnly(config: CatalogueConfig, verb: 'report' | 'stats', scanId: 
   }
 }
 
-function formatStats(summary: ReturnType<typeof reportSummary>): string {
+export function formatStats(summary: ReturnType<typeof reportSummary>): string {
   const scan = summary.scan;
   return [
     `Scan ${scan.id} (${scan.status}) — ${scan.filesSeen} files, ` +
       `${formatBytes(scan.bytesSeen)}, ${scan.errors} errors, ${(scan.durationMs / 1000).toFixed(1)}s.`,
     `Roots: ${summary.roots.length}`,
-    ...summary.roots.map((root) => `  ${root.path}: ${root.files} files, ${formatBytes(root.bytes)}`),
+    ...summary.roots.map(
+      (root) =>
+        `  ${root.path} (${rootStatusText(root)}${root.fstype === null ? '' : `, ${root.fstype}`}): ` +
+        `${root.files} files, ${formatBytes(root.bytes)}`,
+    ),
     ...summary.kinds.map((kind) => `  ${kind.kind}: ${kind.files} files, ${formatBytes(kind.bytes)}`),
     `  ${summary.bundles.total} bundles, ${summary.duplicates.groups} duplicate groups, ` +
       `${formatBytes(summary.duplicates.wastedBytes)} wasted.`,

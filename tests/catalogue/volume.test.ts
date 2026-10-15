@@ -6,9 +6,12 @@
  * The cases come straight from the situation this feature exists for: an
  * external drive that is unplugged, reformatted, or replaced.
  */
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { formatStats } from '../../src/catalogue/cli.js';
 import { computeHashes } from '../../src/catalogue/dedupe.js';
+import { reportSummary, writeReport } from '../../src/catalogue/report.js';
 import { defaultVolumeProbe, findmntAvailable, identityModeFor, parseFindmnt } from '../../src/catalogue/volume.js';
 import {
   FINDMNT_EXFAT,
@@ -259,6 +262,57 @@ describe('volume handling (Phase 1 Task 1b)', () => {
       expect(volumeErrors(w.store, result.scanId)).toEqual([]);
       expect(itemsOf(w.store, w.drive).every((row) => row.status === 'present')).toBe(true);
       expect(first.scanId).toBeLessThan(result.scanId);
+    });
+  });
+
+  describe('an offline root in the report and stats', () => {
+    it('keeps its last known count and says it was not scanned this run', async () => {
+      // The plan's acceptance step 6: "confirm stats shows it offline with its
+      // item count unchanged". Without this, an unplugged drive silently drops
+      // out of the totals and reads as a drive that lost everything.
+      const w = world('report-unplugged-drive', { uuid: 'drive-uuid-r', label: 'MYDRIVE', fstype: 'exfat' }, cleanups);
+      const first = await scanWorld(w);
+      const driveBefore = reportSummary(w.store, first.scanId).roots.find((root) => root.path === w.drive);
+      expect(driveBefore?.status).toBe('online');
+      expect(driveBefore?.fstype).toBe('exfat');
+      const driveFiles = driveBefore?.files ?? -1;
+      expect(driveFiles).toBeGreaterThan(0);
+
+      // Unplugged: this scan records the drive offline and touches none of its
+      // items, so they keep an older last_seen_scan.
+      emptyMountPoint(w);
+      w.driveIs(null);
+      const second = await scanWorld(w);
+
+      const summary = reportSummary(w.store, second.scanId);
+      expect(summary.roots.map((root) => root.path).sort()).toEqual([...w.roots].sort());
+
+      const drive = summary.roots.find((root) => root.path === w.drive);
+      expect(drive?.status).toBe('offline');
+      expect(drive?.files).toBe(driveFiles);
+      // The drive is away, but which drive it was is still known and worth saying.
+      expect(drive?.fstype).toBe('exfat');
+
+      const laptop = summary.roots.find((root) => root.path === w.root);
+      expect(laptop?.status).toBe('online');
+      expect(laptop?.fstype).toBe('btrfs');
+
+      // All three surfaces say so: the Markdown table, summary.json, and stats.
+      const report = writeReport(w.store, second.scanId, join(w.fixture.parent, 'data'));
+      const markdown = readFileSync(join(report.dir, 'summary.md'), 'utf8');
+      expect(markdown).toMatch(/offline, not scanned this run/);
+      expect(markdown).toMatch(/exfat/);
+      expect(JSON.parse(readFileSync(join(report.dir, 'summary.json'), 'utf8'))).toMatchObject({
+        roots: expect.arrayContaining([
+          expect.objectContaining({ path: w.drive, status: 'offline', fstype: 'exfat', files: driveFiles }),
+        ]),
+      });
+      expect(formatStats(summary)).toMatch(/offline/);
+      // The status is on the drive's own line, not merely somewhere in the output
+      // (the fixture's own directory name once satisfied a bare /offline/ match).
+      expect(formatStats(summary)).toContain(
+        `${w.drive} (offline, not scanned this run, exfat): ${driveFiles} files`,
+      );
     });
   });
 

@@ -137,6 +137,15 @@ export function itemPath(root: string, relPath: string): string {
   return `${root}/${relPath}`;
 }
 
+/**
+ * `online`, or `offline, not scanned this run`. An offline root's figures come
+ * from an earlier scan, and a report has to say so: a missing drive must never
+ * read as a drive that lost its contents.
+ */
+export function rootStatusText(root: { status: string }): string {
+  return root.status === 'offline' ? 'offline, not scanned this run' : 'online';
+}
+
 /** Keeps a name inside one table cell: no pipes, no line breaks. */
 function cell(value: string | number | null | undefined): string {
   if (value === null || value === undefined) return '';
@@ -215,8 +224,14 @@ export function renderMarkdown(summary: ReportSummary): string {
         `${scan.errors} errors.`,
     ].join('\n'),
     `## Totals per root\n\n${renderRows(
-      ['Root', 'Files', 'Bytes'],
-      summary.roots.map((root) => [root.path, root.files, bytes(root.bytes)]),
+      ['Root', 'Status', 'Filesystem', 'Files', 'Bytes'],
+      summary.roots.map((root) => [
+        root.path,
+        rootStatusText(root),
+        root.fstype ?? '',
+        root.files,
+        bytes(root.bytes),
+      ]),
     )}`,
     `## Counts per kind\n\n${renderRows(
       ['Kind', 'Files', 'Bytes'],

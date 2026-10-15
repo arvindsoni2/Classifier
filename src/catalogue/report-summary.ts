@@ -20,7 +20,18 @@ export interface ReportSummary {
     filesHashed: number;
     errors: number;
   };
-  roots: { path: string; files: number; bytes: number }[];
+  /**
+   * Every root the scan covered, whether or not it was reachable. An offline
+   * root is listed with the figures from its last successful scan, and says so:
+   * an unplugged drive must never read as an empty one.
+   */
+  roots: {
+    path: string;
+    status: 'online' | 'offline';
+    fstype: string | null;
+    files: number;
+    bytes: number;
+  }[];
   kinds: { kind: string; files: number; bytes: number }[];
   bundles: {
     total: number;

@@ -323,7 +323,9 @@ describe('catalogue report (Phase 1 Task 5)', () => {
     // Markdown tables would break on a pipe or newline, so paths are escaped there.
     const markdown = readFileSync(join(report.dir, 'summary.md'), 'utf8');
     expect(markdown).toContain('newline é');
-    expect(markdown.split('\n').every((line) => line.split('|').length <= 6)).toBe(true);
+    // The widest table is Totals per root: five columns, so six pipes and seven
+    // parts. A name that leaked one would show up here as an extra column.
+    expect(markdown.split('\n').every((line) => line.split('|').length <= 7)).toBe(true);
   });
 
   it('reports only what that one scan saw', async () => {
