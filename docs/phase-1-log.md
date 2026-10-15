@@ -647,9 +647,13 @@ Three commits, one per blocker, in the order they were approved:
 
 | Commit | Blocker |
 | --- | --- |
-| `24214b6` | 1 — Python virtualenvs catalogued file by file |
-| `a3d5376` | 3 — `extracted_archive` claimed only its top level |
-| `810a6ff` | 2 — the largest course on disk was not a course |
+| `f97a2d2` | 1 — Python virtualenvs catalogued file by file |
+| `da9284c` | 3 — `extracted_archive` claimed only its top level |
+| `0806757` | 2 — the largest course on disk was not a course |
+
+(These hashes were wrong when first written — `24214b6`, `a3d5376` and `810a6ff`
+came from an earlier local rebase — and were corrected on 2026-10-15, per the
+review's should-fix 5.)
 
 **Tests:** 297 pass (286 before, +11). `pnpm typecheck`, `pnpm lint` and
 `pnpm test` all pass. Every blocker was verified against Arvind's real catalogue
@@ -821,7 +825,7 @@ The Phase 1 review's nine "should fix" items are untouched.
 ## Task 1b — Filesystem-aware volume handling
 
 Plan Task 1, second session (the plan splits it; spec D31). One commit:
-`feat(catalogue): filesystem-aware volume handling`.
+`feat(catalogue): filesystem-aware volume handling` (`7535e89`).
 
 **Tests:** 322 pass (303 after 1a, +19). `pnpm typecheck`, `pnpm lint` and
 `pnpm test` all pass. Thirteen mutations, each caught by the test that owns the
@@ -924,3 +928,92 @@ facts, so the next scan records them and, by decision 2, retires nothing.
 ### Still open
 
 The Phase 1 review's nine "should fix" items are still untouched.
+
+---
+
+## Review follow-up — an offline root in the report and stats
+
+The Phase 1 volume review (`docs/reviews/phase-1-volumes-2026-10-15.md`), its one
+blocker. One commit: `fix(catalogue): report and stats show offline roots`
+(`23feb32`).
+
+**Tests:** 323 pass (322 before, +1). `pnpm typecheck`, `pnpm lint` and
+`pnpm test` all pass. Six mutations, each caught by the test that owns the rule.
+
+### The blocker
+
+The report built `summary.roots` from the items it had read for the scan — the
+items with `last_seen_scan = <scan>`. An offline root's items keep an older
+`last_seen_scan`, so the root was not in the list at all: an unplugged drive
+dropped out of the totals and read as a drive that had lost everything. Plan
+acceptance step 6 ("confirm `stats` shows it offline with its item count
+unchanged") had nothing to confirm, because nothing printed it. `scan_roots` has
+held the per-scan status since Task 1a; nothing read it.
+
+### What changed
+
+`summary.roots` now comes from `scan_roots` for the reported scan. Each root
+carries `status` (`online`/`offline`), `fstype`, `files` and `bytes`.
+
+- **online:** this scan's items, exactly as before.
+- **offline:** its `present` items, whatever their `last_seen_scan` — the last
+  trustworthy figures for that drive. Its status reads `offline, not scanned this
+  run`, and its `fstype` is the last one recorded, because a drive that is away
+  cannot be asked and "which drive is missing" is worth answering.
+- **no `scan_roots` rows** (a scan from before the table, or one run without a
+  volume probe): fall back to the roots its items came from, which is what every
+  report did before volumes existed. Historical reports and probe-less scans are
+  therefore unchanged — this suite's own report fixtures included.
+
+Status and filesystem now appear in the `Totals per root` table in `summary.md`
+(five columns), in `summary.json`, and on each root's line in `stats`. Every
+other figure — kinds, largest files, bundles, duplicates, incomplete files,
+errors — stays scoped to the scan.
+
+This supersedes the Task 1b entry's "the report still does not show volumes".
+
+### Decisions
+
+1. **An offline root's `fstype` is the root's last recorded one**, not the null
+   the per-scan row holds (`scan_roots.fstype` is null for an offline root by
+   design: the volume was not probed). `COALESCE(sr.fstype, r.fstype)`.
+2. **An online root with no items is still listed**, with 0 files: the list is
+   what the scan covered, not what it found.
+3. **The fallback is kept** rather than making every scan record `scan_roots`.
+   The alternative — the scanner writing a row for a probe-less scan too — was
+   larger, and a fallback cannot be wrong about a scan that already happened.
+
+### The test
+
+In the volume world: scan with the drive present, unplug it, scan again.
+`reportSummary(store, second.scanId).roots` lists both roots; the drive's entry
+is `offline`, with the same file count as after the first scan and its `exfat`;
+`summary.md`, `summary.json` and `formatStats` all say so. `formatStats` is now
+exported so `stats` can be asserted without spawning the built CLI.
+
+One correction came out of the mutation checks themselves: the first version
+asserted `/offline/` anywhere in the stats output, and the fixture's own
+directory name contained "offline", so the assertion passed even with the status
+removed. It now asserts the drive's own line.
+
+### Mutation checks
+
+Six, each caught: roots built from the items again; an offline root's figures
+taken from this scan's items (so: zero); the offline `fstype` left as the
+unreadable null; the status text never saying offline; `stats` dropping the
+status; an offline root not recorded in `scan_roots` at all.
+
+### Commit hashes corrected
+
+The "Review follow-up — Phase 1 blockers" table listed `24214b6`, `a3d5376` and
+`810a6ff`, which came from an earlier local rebase. The commits in history are
+`f97a2d2` (virtualenvs), `da9284c` (archive subtree) and `0806757` (course
+marker); the table now says so, and the Task 1b entry carries its hash,
+`7535e89`. (Review should-fix 5.)
+
+### Left alone
+
+The review's should-fix items 1–4 and 6–8 are untouched, as agreed; item 5 was
+the stale hashes, corrected above because this task asked for it. Two of the
+untouched ones will show on the next real run: the 87 metadata failures under
+"0 errors", and historical reports losing their bundles after a rescan.
