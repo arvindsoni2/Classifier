@@ -1444,3 +1444,61 @@ non-zero `metadata.stored.failed`. That closes the gap the mutation found.
   skips with a visible reason. Item 3 needs a re-run wherever qpdf exists before Phase 5.
 - Task 6 step 6 (external drive unplug/replug) is still deferred: no drive attached. Phase 5
   cannot start until it passes on real hardware.
+
+## Task 8 review follow-up — 2026-10-16 — commit e91ede4
+
+Two blockers from `docs/reviews/phase-1-task-8-2026-10-16.md` (authored now, with the review);
+one session, one commit.
+
+### Code changes
+
+- **Blocker 1 — password-locked PDFs (`src/catalogue/metadata/pdfinfo.ts`, version now 1.1.0).**
+  A non-zero exit whose stderr contains `Incorrect password` is `ok` with fields
+  `{ encrypted: true, password_protected: true }`; `Encrypted: yes` with exit 0 stays `ok` with
+  `encrypted: true`; any other non-zero exit stays `failed`. While wiring the test a third,
+  latent bug surfaced and is fixed in the same commit: `Encrypted` matched by exact
+  `=== 'yes'`, but pdfinfo prints `Encrypted:  yes (print:yes copy:yes ...)`, so the check was
+  always false. It is `startsWith('yes')` now. The old test shipped this assertion but had
+  never executed it (qpdf absent ⇒ skip), so the review skip was real and the assertion dead.
+- **Blocker 2 — settled means same extractor version (`src/catalogue/metadata/index.ts`).**
+  The settled-row lookup now selects `extractor_version` and spares a re-extraction only when
+  the status is `ok` or `failed` **and** the row's version equals the extractor's current one;
+  anything older is re-extracted, and the row is rewritten with the new version. `epub`,
+  `office` and `pdfinfo` bumped to `@1.1.0`; `ffprobe` and `exif` stay `@1.0.0`.
+- `tests/catalogue/metadata-encrypted.test.ts` rewritten around two real qpdf fixtures —
+  `qpdf --encrypt '' '' 256 --` (user-readable: `ok`, `encrypted: true`) and
+  `qpdf --encrypt secret owner 256 --` (locked: `ok`, `encrypted: true`,
+  `password_protected: true`), plus an unencrypted control asserting `encrypted: false`.
+  256-bit only: qpdf 12 refuses 128-bit RC4 (verified, exit 2). The lock, its message text
+  and the exit code were verified live in `/tmp/opencode` before the assertions were written.
+- `tests/catalogue/metadata-settled.test.ts` gained the version test (older version retried
+  once, then settled again at the new version) and the doc comment now says "per extractor
+  version".
+
+### Verification
+
+- TDD: both new tests written first and watched red — the encrypted test failed on
+  `readable.fields.encrypted` (the `=== 'yes'` bug), the version test on `next.calls` being 0.
+- Mutation runs, both caught against the owning file:
+  - **F1** — `passwordRefused = false` in `pdfinfo.ts`: `metadata-encrypted.test.ts` fails
+    (locked.pdf asserted ok, treated as failure).
+  - **F2** — settled check ignores `extractorVersion` in `index.ts`:
+    `metadata-settled.test.ts` fails on the version test (old-version failed row not retried).
+- `pnpm typecheck && pnpm lint && pnpm test`: 49 files, **379 passed, 0 skipped** (was
+  377 passed + 1 skipped; +1 new version test, +1 flow, and the qpdf skip died — qpdf 12.3.2
+  is installed, so item 3's "unproven machine" deferral is closed by this commit).
+- No file over 400 lines: `index.ts` 295, `metadata-settled.test.ts` 227, `pdfinfo.ts` 99,
+  `metadata-encrypted.test.ts` 92. No new dependencies. No CLI run against a real root.
+
+### Interpretations and out-of-task effects
+
+- The review doc did not exist in the repo (`docs/reviews/phase-1-task-8-2026-10-16.md` was
+  missing); it was authored from the two blockers as the instructions said, and is committed
+  with the fix.
+- **Consequence for real roots, stated explicitly:** every stored `ok`/`failed` row from
+  `epub`, `office` and `pdfinfo` `@1.0.0` is now un-settled, so the next real rescan
+  re-extracts the affected metadata once (~2,140 pdfinfo rows, 166+72 epub/office rows and
+  the 49 failed rows in the volume catalogue) instead of the "0 extracted this run" a same-
+  version rescan gives. That is the designed effect of the version bump, not a regression.
+- The real catalogue's 87 `metadata_failures.csv` entries will shrink at that rescan: the
+  39 pdfinfo failures include locked PDFs that now record `ok`/`password_protected`.
