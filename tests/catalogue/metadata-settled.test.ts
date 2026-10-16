@@ -1,9 +1,10 @@
 /**
- * Phase 1 Task 8 item 2: deterministic metadata failures settle.
+ * Phase 1 Task 8 item 2, as sharpened by the Task 8 review: deterministic
+ * metadata failures settle *at a version*, not forever.
  *
- * `failed` joins `ok` and `unavailable` as settled: a failed extraction is not
- * retried while the item is unchanged. `timeout` and `unavailable` are still
- * retried every scan (the machine may be less busy, or the tool installed since).
+ * `failed` joins `ok` as settled only when the stored row's extractor version is
+ * the extractor's current one; an older row is re-extracted (a version bump means
+ * behaviour changed). `timeout` and `unavailable` are still retried every scan.
  * A changed file drops its metadata rows during the scan, so it is retried then.
  */
 import { writeFileSync } from 'node:fs';
@@ -38,10 +39,10 @@ async function scanOnly(fixture: Fixture, store: CatalogueStore): Promise<number
   return result.scanId;
 }
 
-function failingExtractor(name: string): Extractor & { calls: number } {
+function failingExtractor(name: string, version = 'fake@1.0.0'): Extractor & { calls: number } {
   const extractor = {
     name,
-    version: 'fake@1.0.0',
+    version,
     appliesTo: () => true,
     available: async () => true,
     extract: async () => {
@@ -93,6 +94,34 @@ function unavailableExtractor(name: string): Extractor & { calls: number; availa
 }
 
 describe('settled metadata failures (Task 8 item 2)', () => {
+  it('a failed row from an older extractor version is re-extracted; the current version settles', async () => {
+    const fixture = makeFixture('settled-version');
+    fixture.put('broken.epub', Buffer.from('not a zip at all'));
+    const old = failingExtractor('failing', 'fake@1.0.0');
+    const store = openStoreFor(fixture);
+    const scanId = await scanOnly(fixture, store);
+    await extractMetadata(store, scanId, { extractors: [old] });
+    expect(old.calls).toBe(1);
+    expect(metadataRows(store)[0]?.extractorVersion).toBe('fake@1.0.0');
+
+    // The extractor bumped: the old failed row no longer settles, so it is
+    // retried once and the row carries the new version.
+    const next = failingExtractor('failing', 'fake@1.1.0');
+    const secondScanId = await scanOnly(fixture, store);
+    const second = await extractMetadata(store, secondScanId, { extractors: [next] });
+    expect(next.calls).toBe(1);
+    expect(second.extracted).toBe(1);
+    expect(second.unchanged).toBe(0);
+    expect(metadataRows(store)[0]?.extractorVersion).toBe('fake@1.1.0');
+
+    // The same version on the next rescan is settled again.
+    const thirdScanId = await scanOnly(fixture, store);
+    const third = await extractMetadata(store, thirdScanId, { extractors: [next] });
+    expect(next.calls).toBe(1);
+    expect(third.extracted).toBe(0);
+    expect(third.unchanged).toBe(1);
+  });
+
   it('a failed extraction is settled and not retried on an unchanged rescan', async () => {
     const fixture = makeFixture('settled-failed');
     fixture.put('broken.epub', Buffer.from('not a zip at all'));

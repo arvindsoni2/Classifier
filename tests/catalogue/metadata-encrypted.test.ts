@@ -1,10 +1,15 @@
 /**
- * Phase 1 Task 8 item 3: an encrypted PDF is `ok`, not a failure.
+ * Phase 1 Task 8 review blocker 1: password-locked PDFs are `ok`, not failures.
  *
- * When pdfinfo reports encryption (or fails only because the file is
- * password-protected), the row is `ok` with `encrypted: true` and whatever
- * pdfinfo did report. Built with qpdf when available; skipped with a visible
- * reason otherwise.
+ * Three states, one row each: an unencrypted PDF (`Encrypted: no`, exit 0), a
+ * user-readable encrypted one (`Encrypted: yes`, exit 0), and a locked one
+ * (non-zero exit, `Incorrect password` on stderr). The locked row is `ok` with
+ * `encrypted: true` and `password_protected: true`; anything else still fails.
+ *
+ * Fixtures are built with `qpdf --encrypt <user> <owner> 256 --`; qpdf 11+
+ * refuses the 128-bit RC4 the earlier draft used, and also requires the 256-bit
+ * form to state both passwords. Skipped with a visible reason only when qpdf is
+ * absent.
  */
 import { execFileSync } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
@@ -44,25 +49,24 @@ function rowFor(store: CatalogueStore, relPath: string) {
   return metadataRows(store).find((row) => row.relPath === relPath);
 }
 
-describe('encrypted PDF (Task 8 item 3)', () => {
-  it('is recorded ok with encrypted true', async (context) => {
-    let qpdfVersion: string;
+/** Encrypts `source` into `dest` with the given user and owner passwords. */
+function encryptPdf(source: string, dest: string, user: string, owner: string): void {
+  execFileSync('qpdf', ['--encrypt', user, owner, '256', '--', source, dest]);
+}
+
+describe('password-protected PDFs (Task 8 review blocker 1)', () => {
+  it('records readable encrypted as ok, locked as ok with password_protected, plain as ok', async (context) => {
     try {
-      qpdfVersion = execFileSync('qpdf', ['--version'], { encoding: 'utf8' });
+      execFileSync('qpdf', ['--version'], { stdio: 'ignore' });
     } catch {
       context.skip('qpdf is not installed, so an encrypted PDF cannot be built');
       return;
     }
-    void qpdfVersion;
 
     const fixture = makeFixture('encrypted-pdf');
     fixture.put('plain.pdf', makePdfWithInfo({ Title: 'Plain', Author: 'A. Fixture' }, 1));
-    // Encrypt with empty owner and user passwords: the file is a real PDF but
-    // pdfinfo cannot read its contents without a password.
-    execFileSync(
-      'qpdf',
-      ['--encrypt', '', '', '128', '--', join(fixture.root, 'plain.pdf'), join(fixture.root, 'secret.pdf')],
-    );
+    encryptPdf(join(fixture.root, 'plain.pdf'), join(fixture.root, 'readable.pdf'), '', '');
+    encryptPdf(join(fixture.root, 'plain.pdf'), join(fixture.root, 'locked.pdf'), 'secret', 'ownersecret');
 
     const store = openStoreFor(fixture);
     const scanId = await scanOnly(fixture, store);
@@ -71,10 +75,18 @@ describe('encrypted PDF (Task 8 item 3)', () => {
     const plain = rowFor(store, 'plain.pdf');
     expect(plain?.status).toBe('ok');
     expect(plain?.fields.encrypted).toBe(false);
+    expect(plain?.fields.password_protected).toBeUndefined();
 
-    const secret = rowFor(store, 'secret.pdf');
-    // Encryption is recorded: ok with the flag, not a failed extraction.
-    expect(secret?.status).toBe('ok');
-    expect(secret?.fields.encrypted).toBe(true);
+    // Empty user password: pdfinfo opens it and reports `Encrypted: yes`.
+    const readable = rowFor(store, 'readable.pdf');
+    expect(readable?.status).toBe('ok');
+    expect(readable?.fields.encrypted).toBe(true);
+    expect(readable?.fields.password_protected).toBeUndefined();
+
+    // Non-empty user password: pdfinfo refuses with `Incorrect password`.
+    const locked = rowFor(store, 'locked.pdf');
+    expect(locked?.status).toBe('ok');
+    expect(locked?.fields.encrypted).toBe(true);
+    expect(locked?.fields.password_protected).toBe(true);
   });
 });

@@ -4,10 +4,12 @@
  * Five extractors, one row per item and extractor, four possible statuses. The
  * rules that keep this pass cheap and safe on someone's real filesystem:
  *
- *  - **Nothing is extracted twice.** An item whose row already says `ok` keeps
- *    it, and a changed item loses its rows during the scan itself (see
- *    `CatalogueStore.upsertItems`), so "has a row" and "is current" are the
- *    same thing. A rescan of an unchanged tree does no extraction at all.
+ *  - **Nothing is extracted twice (per extractor version).** A row whose status
+ *    is `ok` or `failed` spares its item only while it was written by the
+ *    extractor's current version; a version bump retries the older rows, and a
+ *    changed item loses its rows during the scan itself (see
+ *    `CatalogueStore.upsertItems`). "Has a current row" and "is current" are the
+ *    same thing.
  *  - **Availability is asked once per extractor per scan.** A machine without
  *    `ffprobe` records `unavailable` for its audio files instead of failing
  *    each one, and does not re-probe for every file.
@@ -90,9 +92,10 @@ interface ExistingRow {
   item_id: number;
   extractor: string;
   status: string;
+  extractorVersion: string;
 }
 
-/** Statuses that mean "nothing more to do for this item and extractor". */
+/** Statuses that mean "this row needs no more work for its extractor". */
 const SETTLED: ReadonlySet<string> = new Set(['ok', 'failed']);
 
 /**
@@ -120,7 +123,7 @@ export async function extractMetadata(
   const settled = new Map<string, ExistingRow>(
     (store.db
       .prepare(
-        `SELECT m.item_id, m.extractor, m.status FROM metadata m
+        `SELECT m.item_id, m.extractor, m.status, m.extractor_version AS extractorVersion FROM metadata m
          JOIN items i ON i.id = m.item_id
          WHERE i.last_seen_scan = ?`,
       )
@@ -146,7 +149,14 @@ export async function extractMetadata(
       if (!extractor.appliesTo(candidate.kind as Kind, candidate.ext)) continue;
       summary.candidates += 1;
       const existing = settled.get(`${candidate.id}:${extractor.name}`);
-      if (existing !== undefined && SETTLED.has(existing.status)) {
+      // A settled row spares a re-extraction only when it is `ok` or `failed`
+      // *and* was written by the extractor's current version: a version bump
+      // means behaviour changed, so its older `ok` and `failed` rows are retried.
+      if (
+        existing !== undefined &&
+        SETTLED.has(existing.status) &&
+        existing.extractorVersion === extractor.version
+      ) {
         summary.unchanged += 1;
         continue;
       }

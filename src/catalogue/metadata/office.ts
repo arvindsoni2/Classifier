@@ -25,7 +25,7 @@ const CORE_FIELDS: readonly (readonly [string, string])[] = [
 
 export const officeExtractor: Extractor = {
   name: 'office',
-  version: 'office@1.0.0',
+  version: 'office@1.1.0',
 
   appliesTo(kind, ext) {
     return OFFICE_EXTENSIONS.has(ext);

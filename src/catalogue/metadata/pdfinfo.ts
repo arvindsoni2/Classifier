@@ -10,7 +10,7 @@ import { runTool } from './proc.js';
 import { NOT_A_REGULAR_FILE } from '../open.js';
 import { lstat } from 'node:fs/promises';
 
-const VERSION = 'pdfinfo@1.0.0';
+const VERSION = 'pdfinfo@1.1.0';
 const TOOL = 'pdfinfo';
 const TOOL_TIMEOUT_MS = 10_000;
 /** pdfinfo key to catalogue field. Only these are stored. */
@@ -74,13 +74,15 @@ export const pdfinfoExtractor: Extractor = {
     const output = run.stdout.toString('utf8');
     const fields = parseInfo(output);
     const encrypted = fields.get('Encrypted');
-    const isEncrypted = encrypted !== undefined && encrypted.toLowerCase() === 'yes';
+    // `Encrypted: yes (print:yes copy:yes ...)` is pdfinfo's full line for an
+    // encrypted file, so the test is a prefix, not an exact match.
+    const isEncrypted = encrypted !== undefined && encrypted.toLowerCase().startsWith('yes');
+    // A non-empty user password: pdfinfo prints `Incorrect password` on stderr
+    // and exits non-zero. The file is present, deliberately protected and its
+    // encryption state is known, so that is `ok`, not a catalogue failure.
+    const passwordRefused = run.code !== 0 && run.stderr.includes('Incorrect password');
 
-    // A password-protected PDF still reports `Encrypted: yes`, and some builds
-    // exit non-zero for it. That is not a catalogue failure: the file is present
-    // and its encryption state is known, so record it as ok with what pdfinfo
-    // reported. Anything else that exits non-zero is a real failure.
-    if (run.code !== 0 && !isEncrypted) {
+    if (run.code !== 0 && !isEncrypted && !passwordRefused) {
       throw new Error(`pdfinfo exited ${String(run.code)}: ${run.stderr.trim().slice(0, 200)}`);
     }
 
@@ -91,7 +93,8 @@ export const pdfinfoExtractor: Extractor = {
     }
     const pages = integerOrUndefined(fields.get('Pages'));
     if (pages !== undefined) kept.pages = pages;
-    if (encrypted !== undefined) kept.encrypted = isEncrypted;
+    if (encrypted !== undefined || passwordRefused) kept.encrypted = isEncrypted || passwordRefused;
+    if (passwordRefused) kept.password_protected = true;
     return kept;
   },
 };

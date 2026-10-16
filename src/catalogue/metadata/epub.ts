@@ -24,7 +24,7 @@ const OPF_FIELDS: readonly (readonly [string, string])[] = [
 
 export const epubExtractor: Extractor = {
   name: 'epub',
-  version: 'epub@1.0.0',
+  version: 'epub@1.1.0',
 
   appliesTo(kind, ext) {
     return kind === 'ebook' && ext === 'epub';
